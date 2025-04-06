@@ -1,49 +1,7 @@
-# ============================================
-# STRATEGY OVERVIEW
-# ============================================
-# This trading bot operates on two products: RAINFOREST_RESIN and KELP.
-# RAINFOREST_RESIN is stable, KELP is volatile.
+# ====================== #
+# CODE USED IN TUTORIAL  #
+# ====================== #
 
-# For each product, the bot attempts to:
-# 1. Take advantage of mispriced orders via aggressive (market-taking) trades.
-# 2. Provide passive liquidity using limit orders just inside the spread.
-# 3. Clear position if needed near fair value to stay within limits.
-
-# ============================================
-# RAINFOREST_RESIN STRATEGY
-# ============================================
-# - Assumes a fixed fair value (e.g. 10000).
-# - Takes any best ask that is under fair value (buy low).
-# - Takes any best bid that is over fair value (sell high).
-# - Posts passive limit orders just inside the spread:
-#     • Buys at (max bid below fair value) + 1
-#     • Sells at (min ask above fair value) - 1
-# - Clears position when it deviates from zero using market orders near fair value.
-
-# ============================================
-# KELP STRATEGY
-# ============================================
-# - Computes fair value using volume-weighted average price (VWAP) over a time window.
-#     • Top-level VWAP is computed from best bid and ask.
-#     • If VWAP is enabled, rolling VWAP is used as fair value.
-#     • Otherwise, filtered midpoint is used.
-# - Filters bids and asks based on volume threshold to avoid reacting to "dust".
-# - Takes any best ask under (fair value - kelp_take_width).
-# - Takes any best bid above (fair value + kelp_take_width).
-# - Clears position when necessary using near-fair-value market orders.
-# - Posts passive liquidity at prices unlikely to execute immediately:
-#     • Buys at (max bid below fair) + 1
-#     • Sells at (min ask above fair) - 1
-
-# ============================================
-# RISK MANAGEMENT
-# ============================================
-# - Both products have position limits (e.g. ±50).
-# - Orders are sized to never exceed position limit.
-# - clear_position_order() is used to flatten positions near fair value
-#   using natural liquidity when current position is not neutral.
-#   (Flattening means reducing an open position back toward zero, minimizing exposure.
-#   This helps lock in profits or limit losses, especially when price is close to fair value)
 
 from datamodel import OrderDepth, TradingState, Order
 from typing import List
@@ -69,51 +27,65 @@ class Trader:
         Returns:
             List[Order]: A list of buy/sell orders.
         """
-        orders: List[Order] = []
+        orders = [] # Initialize orders list
+        buy_order_volume = 0 # To keep track of the buy and sell volumes
+        sell_order_volume = 0 # Needed to flatten our positions (see flatten() function)
 
-        buy_order_volume = 0
-        sell_order_volume = 0
-        
-        sell_candidates = [price for price in order_depth.sell_orders.keys() if price > fair_value]
-        baaf = min(sell_candidates) if sell_candidates else fair_value + 1
+        # Can't trade without a book
+        if not order_depth.sell_orders or not order_depth.buy_orders:
+            return orders 
 
-        buy_candidates = [price for price in order_depth.buy_orders.keys() if price < fair_value]
-        bbbf = max(buy_candidates) if buy_candidates else fair_value - 1
-
+        # Since the value of RESIN does not fluctuate that much, we check for potential 
+        # buy and sell opportunities by checking prices above and below the fair value
+        # First we check for buy options
         if len(order_depth.sell_orders) != 0:
+            # get best ask price and its amount
             best_ask = min(order_depth.sell_orders.keys())
             best_ask_amount = -1*order_depth.sell_orders[best_ask]
-            if best_ask < fair_value:
-                quantity = min(best_ask_amount, position_limit - position) # max amt to buy 
+            if best_ask < fair_value: # Lower than our set fair value?
+                quantity = min(best_ask_amount, position_limit - position) # Max amount we can buy
                 if quantity > 0:
                     orders.append(Order("RAINFOREST_RESIN", int(best_ask), quantity)) 
                     buy_order_volume += quantity
 
+        # Now check for sell options
         if len(order_depth.buy_orders) != 0:
+            # get best bid price and its amount
             best_bid = max(order_depth.buy_orders.keys())
             best_bid_amount = order_depth.buy_orders[best_bid]
-            if best_bid > fair_value:
-                quantity = min(best_bid_amount, position_limit + position) # should be the max we can sell 
+            if best_bid > fair_value: # Higher than fair value?
+                quantity = min(best_bid_amount, position_limit + position) # max amount we can sell
                 if quantity > 0:
                     orders.append(Order("RAINFOREST_RESIN", int(best_bid), -quantity))
                     sell_order_volume += quantity
         
-        buy_order_volume, sell_order_volume = self.clear_position_order(orders, 
+        # Flatten positions (updates buy and sell volumes)
+        buy_order_volume, sell_order_volume = self.flatten(orders, 
                 order_depth, position, position_limit, "RAINFOREST_RESIN", 
                 buy_order_volume, sell_order_volume, fair_value
         )
 
-        buy_quantity = position_limit - (position + buy_order_volume)
-        if buy_quantity > 0:
-            orders.append(Order("RAINFOREST_RESIN", int(bbbf + 1), buy_quantity))  # Buy order
+        # Market Making/Providing liquidity 
+        # we filter for sell prices above fair value (potentially overpriced)
+        # and buy prices below fair value (potentially underpriced), then:
+        # - we place a buy order at (best_below_bid_fallback + 1) to outbid the current best bid by 1
+        # - we place a sell order at (best_above_ask_fallback - 1) to undercut the current best ask by 1
+        sell_candidates = [price for price in order_depth.sell_orders.keys() if price > fair_value]
+        best_above_ask_fallback = min(sell_candidates) if sell_candidates else fair_value + 1
+        buy_candidates = [price for price in order_depth.buy_orders.keys() if price < fair_value]
+        best_below_bid_fallback = max(buy_candidates) if buy_candidates else fair_value - 1
 
-        sell_quantity = position_limit + (position - sell_order_volume)
+        buy_quantity = position_limit - (position + buy_order_volume) # Calculate amount we can buy
+        if buy_quantity > 0:
+            orders.append(Order("RAINFOREST_RESIN", int(best_below_bid_fallback + 1), buy_quantity))  # Buy order
+
+        sell_quantity = position_limit + (position - sell_order_volume) # Calculate amount we can sell
         if sell_quantity > 0:
-            orders.append(Order("RAINFOREST_RESIN", int(baaf - 1), -sell_quantity))  # Sell order
+            orders.append(Order("RAINFOREST_RESIN", int(best_above_ask_fallback - 1), -sell_quantity))  # Sell order
 
         return orders
     
-    def clear_position_order(self, orders: List[Order], order_depth: OrderDepth, position: int, position_limit: int, product: str, buy_order_volume: int, sell_order_volume: int, fair_value: float) -> List[Order]:    
+    def flatten(self, orders: List[Order], order_depth: OrderDepth, position: int, position_limit: int, product: str, buy_order_volume: int, sell_order_volume: int, fair_value: float) -> List[Order]:    
         """
         Place position-flattening orders near the fair value to reduce inventory risk.
         This function aims to bring the net position closer to zero (flattening);
@@ -132,31 +104,42 @@ class Trader:
         Returns:
             List[Order]: Buy and sell volumes.
         """
-        position_after_take = position + buy_order_volume - sell_order_volume
-        fair_for_bid = math.floor(fair_value)
-        fair_for_ask = math.ceil(fair_value)
+        # This function aims to bring the net position closer to zero;
+        # It tries to clear excess exposure using the available liquidity at or near the fair value
+        # First calculate net position, i.e. adding our buy volume and
+        # subtracting sell volume to/from our current position
+        net_position = position + buy_order_volume - sell_order_volume
 
+        # Then we calculate fair prices for selling and buying
+        good_bid_price = math.floor(fair_value)
+        good_ask_price = math.ceil(fair_value)
+
+        # Calculate the maximum amounts we could sell and buy
         buy_quantity = position_limit - (position + buy_order_volume)
         sell_quantity = position_limit + (position - sell_order_volume)
 
-        if position_after_take > 0:
-            if fair_for_ask in order_depth.buy_orders.keys():
-                clear_quantity = min(order_depth.buy_orders[fair_for_ask], position_after_take)
-                sent_quantity = min(sell_quantity, clear_quantity)
-                orders.append(Order(product, int(fair_for_ask), -abs(sent_quantity)))
-                sell_order_volume += abs(sent_quantity)
+        # Create orders:
+        # If our net position is positive (i.e. we are long), we sell
+        # Check if a bot has a buy order out for the price we set
+        if net_position > 0:
+            if good_ask_price in order_depth.buy_orders.keys():
+                flatten_amount = min(order_depth.buy_orders[good_ask_price], net_position) # Max amount possible for flatten
+                actual_amount = min(sell_quantity, flatten_amount) # Amount we can actually sell
+                orders.append(Order(product, int(good_ask_price), -abs(actual_amount)))
+                sell_order_volume += abs(actual_amount)
 
-        if position_after_take < 0:
-            if fair_for_bid in order_depth.sell_orders.keys():
-                clear_quantity = min(abs(order_depth.sell_orders[fair_for_bid]), abs(position_after_take))
-                sent_quantity = min(buy_quantity, clear_quantity)
-                orders.append(Order(product, int(fair_for_bid), abs(sent_quantity)))
-                buy_order_volume += abs(sent_quantity)
+        # If our net position is negative (short), we can buy
+        # Check if a bot has a sell order out for the price we set
+        if net_position < 0:
+            if good_bid_price in order_depth.sell_orders.keys():
+                flatten_amount = min(abs(order_depth.sell_orders[good_bid_price]), abs(net_position)) # Max amount possible for flatten
+                actual_amount = min(buy_quantity, flatten_amount) # Amount we can actually buy
+                orders.append(Order(product, int(good_bid_price), abs(actual_amount)))
+                buy_order_volume += abs(actual_amount)
         
-    
         return buy_order_volume, sell_order_volume
     
-    def kelp_orders(self, order_depth: OrderDepth, timespan: int, kelp_take_width: float, position: int, position_limit: int, min_vol_threshold: int,vwap: bool = True) -> List[Order]:
+    def kelp_orders(self, order_depth: OrderDepth, timespan: int, take_width: float, position: int, position_limit: int, min_vol_threshold: int,vwap: bool = True) -> List[Order]:
         """
         Generate orders for KELP based on filtered midpoint or VWAP.
 
@@ -173,71 +156,81 @@ class Trader:
         Returns:
             List[Order]: A list of KELP orders.
         """
-        orders: List[Order] = []
-        buy_order_volume = 0
-        sell_order_volume = 0
+        orders = [] # Initialize orders list
+        buy_order_volume = 0 # To keep track of the buy and sell volumes
+        sell_order_volume = 0 # Needed to flatten our positions (see flatten() function)
 
         if not order_depth.sell_orders or not order_depth.buy_orders:
             return orders  # Can't trade without a book
 
-        # Filter valid levels based on min volume threshold
-        valid_asks = [p for p, v in order_depth.sell_orders.items() if abs(v) >= min_vol_threshold]
-        valid_bids = [p for p, v in order_depth.buy_orders.items() if abs(v) >= min_vol_threshold]
+        # In this function we calculate the VWAP if flagged true
+        # Otherwise the estimated fair value for KELP will be based on a midpoint:
+        # best_valid_ask + best_valid_bid divided by 2
+        # So first we filter the valid asks and bids (valid meaning enough volume)
+        valid_asks = [price for price, volume in order_depth.sell_orders.items() if abs(volume) >= min_vol_threshold]
+        valid_bids = [price for price, volume in order_depth.buy_orders.items() if abs(volume) >= min_vol_threshold]
 
-        # Fallback to best available if filters fail
+        # If valid_asks/valid_bids is empty, we just take the best available, ignoring the volume
         best_ask = min(order_depth.sell_orders)
         best_bid = max(order_depth.buy_orders)
         best_valid_ask = min(valid_asks) if valid_asks else best_ask
         best_valid_bid = max(valid_bids) if valid_bids else best_bid
 
-        # Midpoint (from filtered or fallback)
-        filtered_mid = (best_valid_ask + best_valid_bid) / 2
-        self.kelp_prices.append(filtered_mid)
+        # Midpoint
+        midpoint = (best_valid_ask + best_valid_bid) / 2
+        self.kelp_prices.append(midpoint)
 
-        # VWAP calc from top levels
+        # Now calculate VWAP
+        # Note: here we calculate the 'spot' VWAP, we use only the best bid and best ask at *this moment* in time
+        # Later we calculate the rolling VWAP, using historical spot VWAPs over a time window (timespan)
+        # This should smooth out noise, dampening quick spikes and helping avoid overreacting to short-lived moves
         volume = -order_depth.sell_orders[best_ask] + order_depth.buy_orders[best_bid]
         if volume != 0:
-            top_vwap = (
+            spot_vwap = (
                 best_bid * order_depth.buy_orders[best_bid] + 
                 best_ask * -order_depth.sell_orders[best_ask]
             ) / volume
         else:
-            top_vwap = filtered_mid  # fallback
+            spot_vwap = midpoint  # fallback
 
-        self.kelp_vwap.append({"vol": volume, "vwap": top_vwap})
+        # Store spot vwap
+        self.kelp_vwap.append({"vol": volume, "vwap": spot_vwap})
 
+        # If old data exceeds the timespan, remove oldest entries (more memory efficient)
+        # We won't use that data anyway
         if len(self.kelp_vwap) > timespan:
             self.kelp_vwap.pop(0)
         if len(self.kelp_prices) > timespan:
             self.kelp_prices.pop(0)
 
-        # Final fair value
+        # Now calculate the final fair value, i.e. the one based on rolling VWAP
         if vwap:
+            # For this we need the total volume
             total_volume = sum(x["vol"] for x in self.kelp_vwap)
             if total_volume > 0:
                 fair_value = sum(x["vwap"] * x["vol"] for x in self.kelp_vwap) / total_volume
             else:
-                fair_value = filtered_mid
+                fair_value = midpoint
         else:
-            fair_value = filtered_mid
+            fair_value = midpoint
 
         # Market-taking logic
-        if best_valid_ask <= fair_value - kelp_take_width:
-            ask_volume = -order_depth.sell_orders[best_valid_ask]
-            quantity = min(ask_volume, position_limit - position)
+        if best_valid_ask <= fair_value - take_width: # Note the use of take_width!
+            ask_volume = -order_depth.sell_orders[best_valid_ask] # Amount available
+            quantity = min(ask_volume, position_limit - position) # Amount we can buy
             if quantity > 0:
                 orders.append(Order("KELP", int(best_valid_ask), quantity))
                 buy_order_volume += quantity
 
-        if best_valid_bid >= fair_value + kelp_take_width:
-            bid_volume = order_depth.buy_orders[best_valid_bid]
-            quantity = min(bid_volume, position_limit + position)
+        if best_valid_bid >= fair_value + take_width: # Note the use of take_width!
+            bid_volume = order_depth.buy_orders[best_valid_bid] # Amount available
+            quantity = min(bid_volume, position_limit + position) # Amount we can sell
             if quantity > 0:
                 orders.append(Order("KELP", int(best_valid_bid), -quantity))
                 sell_order_volume += quantity
 
-        # Position clearing
-        buy_order_volume, sell_order_volume = self.clear_position_order(
+        # Flatten
+        buy_order_volume, sell_order_volume = self.flatten(
             orders, order_depth, position, position_limit, "KELP",
             buy_order_volume, sell_order_volume, fair_value
         )
@@ -251,13 +244,13 @@ class Trader:
         passive_ask = min(passive_asks) if passive_asks else fair_value + 2
         passive_bid = max(passive_bids) if passive_bids else fair_value - 2
 
-        buy_qty = position_limit - (position + buy_order_volume)
-        if buy_qty > 0:
-            orders.append(Order("KELP", int(passive_bid + 1), buy_qty))
+        buy_quantity = position_limit - (position + buy_order_volume) # Amount we can buy
+        if buy_quantity > 0:
+            orders.append(Order("KELP", int(passive_bid + 1), buy_quantity))
 
-        sell_qty = position_limit + (position - sell_order_volume)
-        if sell_qty > 0:
-            orders.append(Order("KELP", int(passive_ask - 1), -sell_qty))
+        sell_quantity = position_limit + (position - sell_order_volume) # Amount we can sell
+        if sell_quantity > 0:
+            orders.append(Order("KELP", int(passive_ask - 1), -sell_quantity))
 
         return orders
     
@@ -265,29 +258,28 @@ class Trader:
     def run(self, state: TradingState):
         result = {}
 
+        # Resin related variables
         resin_fair_value = 10000
         resin_position_limit = 50
 
+        # Kelp related variables
         # Market-taking threshold: if price deviates this far from fair value, we hit the market to take liquidity
         kelp_take_width = 1
         kelp_position_limit = 50
-
         # VWAP smoothing window: how many recent ticks of price/volume history we consider for VWAP fair value calculation in KELP
         kelp_timemspan = 9
-
         # Only consider order book levels with at least this volume when calculating valid bids/asks to avoid reacting to low-liquidity "fake" orders
         kelp_min_vol_thresh = 15
-
         # If False: midpoint strategy will be used
         kelp_vwap = True 
 
         if "RAINFOREST_RESIN" in state.order_depths:
-            resin_position = state.position["RAINFOREST_RESIN"] if "RAINFOREST_RESIN" in state.position else 0
+            resin_position = state.position.get("RAINFOREST_RESIN", 0) 
             resin_orders = self.resin_orders(state.order_depths["RAINFOREST_RESIN"], resin_fair_value, resin_position, resin_position_limit)
             result["RAINFOREST_RESIN"] = resin_orders
 
         if "KELP" in state.order_depths:
-            kelp_position = state.position["KELP"] if "KELP" in state.position else 0
+            kelp_position = state.position.get("KELP", 0) 
             kelp_orders = self.kelp_orders(state.order_depths["KELP"], kelp_timemspan, kelp_take_width, kelp_position, kelp_position_limit, kelp_min_vol_thresh, kelp_vwap)
             result["KELP"] = kelp_orders
 
