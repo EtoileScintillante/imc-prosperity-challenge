@@ -1,6 +1,6 @@
-# ===================== #
-# CODE USED IN ROUND 1  #
-# ===================== #
+# ====================== #
+# CODE USED IN TUTORIAL  #
+# ====================== #
 
 
 from datamodel import OrderDepth, TradingState, Order
@@ -254,12 +254,6 @@ class Trader:
 
         return orders
     
-    def squid_orders(self, ...) -> List[Order]:
-        # ideas: Regression, Mean Reversion with Volatility Bands (e.g., Bollinger Bands)
-        # Order Book Imbalance, what else ???? squid is more volatile than kelp 
-        raise NotImplementedError
-        return orders
-    
 
     def run(self, state: TradingState):
         result = {}
@@ -279,9 +273,6 @@ class Trader:
         # If False: midpoint strategy will be used
         kelp_vwap = True 
 
-        # squid related variables
-        squid_position_limit = 50
-
         if "RAINFOREST_RESIN" in state.order_depths:
             resin_position = state.position.get("RAINFOREST_RESIN", 0) 
             resin_orders = self.resin_orders(state.order_depths["RAINFOREST_RESIN"], resin_fair_value, resin_position, resin_position_limit)
@@ -292,12 +283,7 @@ class Trader:
             kelp_orders = self.kelp_orders(state.order_depths["KELP"], kelp_timemspan, kelp_take_width, kelp_position, kelp_position_limit, kelp_min_vol_thresh, kelp_vwap)
             result["KELP"] = kelp_orders
 
-        if "SQUID_INK" in state.order_depths:
-            squid_position = state.position.get("SQUID_INK", 0) 
-            squid_orders = self.squid_orders(...)
-            result["SQUID_INK"] = squid_orders
-
-    
+        
         traderData = jsonpickle.encode( { "kelp_prices": self.kelp_prices, "kelp_vwap": self.kelp_vwap})
         conversions = 1
         return result, conversions, traderData
