@@ -13,6 +13,7 @@ class Trader:
     def __init__(self):
         self.kelp_prices = []
         self.kelp_vwap = []
+        self.squid_log_prices = []
 
     def resin_orders(self, order_depth: OrderDepth, fair_value: int, position: int, position_limit: int) -> List[Order]:
         """
@@ -254,10 +255,137 @@ class Trader:
 
         return orders
     
-    def squid_orders(self, ...) -> List[Order]:
-        # ideas: Regression, Mean Reversion with Volatility Bands (e.g., Bollinger Bands)
-        # Order Book Imbalance, what else ???? squid is more volatile than kelp 
-        raise NotImplementedError
+    def squid_orders(self, order_depth: OrderDepth, position: int, position_limit: int,
+                     timespan: int = 20, # Increased default timespan for volatility calc
+                     base_take_width: float = 2.0, # Base deviation for taking
+                     volatility_take_factor: float = 50.0, # Factor scaling take_width with volatility
+                     base_passive_spread: int = 2, # Minimum passive spread in ticks
+                     volatility_spread_factor: float = 50.0, # Factor scaling passive spread with volatility
+                     volatility_size_factor: float = 50.0, # Factor scaling passive size with volatility (inverse)
+                     min_passive_volume: int = 5 # Minimum size for passive orders
+                     ) -> List[Order]:
+        """
+        Strategy for trading SQUID_INK, a highly volatile asset, using insights from the Rough Fractional Stochastic Volatility (RFSV) model.
+
+        Main Strategy:
+        - Adaptive market-taking and market-making using real-time estimates of volatility.
+        - The strategy adjusts aggressiveness and order sizing dynamically based on estimated short-term volatility from log returns.
+
+        Paper Insights Used:
+        - The RFSV model (Gatheral et al., 2014) shows that log-volatility follows a fractional Brownian motion with a very low Hurst exponent (H ≈ 0.1),
+        meaning volatility is highly irregular and "rough" at all timescales.
+        - Because volatility spikes and mean-reverts rapidly, trading strategies should:
+            * Be cautious with large volumes during high volatility.
+            * Quote wider spreads in volatile periods to avoid adverse selection.
+            * Scale order sizes inversely with volatility.
+        - The function uses log midprice returns over a rolling window to estimate local rough volatility and dynamically scale:
+            * The market-taking threshold (take_width)
+            * The passive spread (spread)
+            * The maximum quote volume (max_passive_volume)
+        """
+        # Initialize order list and volume trackers for this round
+        orders: List[Order] = []
+        buy_order_volume = 0
+        sell_order_volume = 0
+
+        if not order_depth.sell_orders or not order_depth.buy_orders:
+            return orders # Can't trade without a book
+
+        # Get best bid and ask prices and calculate midpoint price
+        best_ask = min(order_depth.sell_orders.keys())
+        best_bid = max(order_depth.buy_orders.keys())
+        midpoint = (best_ask + best_bid) / 2
+
+        # We use the midpoint as the simple fair value estimate for this strategy
+        fair_value = midpoint
+
+        # Append the log of the current midpoint to our historical list
+        # Using log prices helps stabilize variance for volatility calculation
+        self.squid_log_prices.append(np.log(midpoint))
+
+        # Maintain a rolling window of log prices
+        if len(self.squid_log_prices) > timespan:
+            self.squid_log_prices.pop(0)
+
+        # Calculate volatility if we have enough data points (at least 2 for np.diff)
+        if len(self.squid_log_prices) >= 2:
+            # Calculate log returns (difference between consecutive log prices)
+            log_returns = np.diff(self.squid_log_prices)
+            # Calculate standard deviation of log returns as our volatility measure
+            volatility = np.std(log_returns)
+        else:
+            # Use a default non-zero volatility if history is too short
+            volatility = 0.005 # Can test with other values
+
+        # Calculate dynamic take width --> increases with volatility
+        # Requires larger deviation from fair value to take aggressively in volatile markets
+        take_width = base_take_width + (volatility * volatility_take_factor)
+
+        # Calculate dynamic passive spread --> also increases with volatility
+        # Quote wider in volatile markets to reduce adverse selection risk
+        # Ensure spread is at least the base minimum
+        spread = max(base_passive_spread, round(base_passive_spread + volatility * volatility_spread_factor))
+
+        # Calculate dynamic passive volume size --> decreases with volatility (inverse scaling)
+        # Quote smaller size when risk (volatility) is high
+        # we use max() to ensure a minimum quoting size and add 1 to denominator to prevent division by zero if vola is near zero
+        max_passive_volume = max(min_passive_volume, round(position_limit / (volatility * volatility_size_factor + 1)))
+
+        # Market Taking:
+        # Buy if best ask is significantly below fair value
+        if best_ask <= fair_value - take_width:
+            # Get volume available at best ask
+            ask_volume = abs(order_depth.sell_orders.get(best_ask, 0))
+            if ask_volume > 0:
+                quantity_to_buy = min(ask_volume, position_limit - position)
+                if quantity_to_buy > 0:
+                    orders.append(Order("SQUID_INK", int(best_ask), quantity_to_buy))
+                    buy_order_volume += quantity_to_buy 
+
+        # Sell if best bid is significantly above fair value
+        if best_bid >= fair_value + take_width:
+             # Get volume available at best bid
+            bid_volume = order_depth.buy_orders.get(best_bid, 0)
+            if bid_volume > 0:
+                quantity_to_sell = min(bid_volume, position_limit + position) 
+                if quantity_to_sell > 0:
+                    orders.append(Order("SQUID_INK", int(best_bid), -quantity_to_sell))
+                    sell_order_volume += quantity_to_sell 
+
+        # Flatten
+        buy_order_volume, sell_order_volume = self.flatten(orders, order_depth, 
+                                              position, position_limit, "SQUID_INK",
+                                              buy_order_volume, sell_order_volume, fair_value)
+
+        # Passive Market Making:
+        # Calculate buy and sell prices using the dynamic spread
+        # Possible addition: inventory skew (if LONG sell more easily, and if SHORT buy more easily)???
+        buy_price = int(fair_value - spread)
+        sell_price = int(fair_value + spread)
+
+        # Make sure sell price is at least buy price + 1 (minimum spread)
+        if sell_price <= buy_price:
+            sell_price = buy_price + 1
+
+        # Calculate remaining capacity after taking and flattening trades
+        remaining_buy_capacity = position_limit - (position + buy_order_volume)
+        remaining_sell_capacity = position_limit + (position - sell_order_volume)
+
+        # Determine final passive order volume, using dynamic max size and respecting capacity
+        buy_volume_passive = min(max_passive_volume, remaining_buy_capacity)
+        buy_volume_passive = max(0, buy_volume_passive) # Make surte this is non-negative
+
+        sell_volume_passive = min(max_passive_volume, remaining_sell_capacity)
+        sell_volume_passive = max(0, sell_volume_passive) # Make surte this is non-negative
+
+        # Buy order
+        if buy_volume_passive > 0:
+            orders.append(Order("SQUID_INK", buy_price, buy_volume_passive))
+
+        # Sell order
+        if sell_volume_passive > 0:
+            orders.append(Order("SQUID_INK", sell_price, -sell_volume_passive))
+
         return orders
     
 
@@ -279,8 +407,15 @@ class Trader:
         # If False: midpoint strategy will be used
         kelp_vwap = True 
 
-        # squid related variables
+        # Squid related variables
         squid_position_limit = 50
+        squid_volatility_timespan = 20 # Lookback window for volatility calc
+        squid_base_take_width = 2.0 # Minimum deviation to take
+        squid_volatility_take_factor = 50.0 # How much take_width increases with vol
+        squid_base_passive_spread = 1 # Minimum passive spread 
+        squid_volatility_spread_factor = 50.0 # How much passive spread increases with vol
+        squid_volatility_size_factor = 50.0 # How much passive size decreases with vol
+        squid_min_passive_volume = 5 # Minimum size for passive orders
 
         if "RAINFOREST_RESIN" in state.order_depths:
             resin_position = state.position.get("RAINFOREST_RESIN", 0) 
@@ -294,10 +429,10 @@ class Trader:
 
         if "SQUID_INK" in state.order_depths:
             squid_position = state.position.get("SQUID_INK", 0) 
-            squid_orders = self.squid_orders(...)
+            squid_orders =squid_orders = self.squid_orders(state.order_depths["SQUID_INK"],squid_position,squid_position_limit,squid_volatility_timespan,
+                squid_base_take_width,squid_volatility_take_factor,squid_base_passive_spread,squid_volatility_spread_factor,squid_volatility_size_factor,squid_min_passive_volume)
             result["SQUID_INK"] = squid_orders
-
-    
-        traderData = jsonpickle.encode( { "kelp_prices": self.kelp_prices, "kelp_vwap": self.kelp_vwap})
+        
+        traderData = jsonpickle.encode( { "kelp_prices": self.kelp_prices, "kelp_vwap": self.kelp_vwap, "squid_log_prices": self.squid_log_prices})
         conversions = 1
         return result, conversions, traderData
