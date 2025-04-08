@@ -483,12 +483,21 @@ class Trader:
         # Passive Market Making:
         # Calculate buy and sell prices using the dynamic spread
         # Possible addition: inventory skew (if LONG sell more easily, and if SHORT buy more easily)???
-        buy_price = int(fair_value - spread)
-        sell_price = int(fair_value + spread)
+        # testing out a skew here , can change it back after - Niall
+        # Inventory-aware passive quoting
+        inventory_skew = position / position_limit  # Range: -1 to 1
 
-        # Make sure sell price is at least buy price + 1 (minimum spread)
+        # Skew the prices to flatten more aggressively when holding large positions
+        buy_price = int(fair_value - spread + inventory_skew * 2)
+        sell_price = int(fair_value + spread + inventory_skew * 2)
+
+        # Maintain at least a 1-tick spread
         if sell_price <= buy_price:
-            sell_price = buy_price + 1
+        sell_price = buy_price + 1
+
+        # earlier logic
+        # buy_price = int(fair_value - spread)
+        # sell_price = int(fair_value + spread)
 
         # Calculate remaining capacity after taking and flattening trades
         remaining_buy_capacity = position_limit - (position + buy_order_volume)
