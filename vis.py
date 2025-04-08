@@ -493,7 +493,7 @@ class Trader:
 
         # Maintain at least a 1-tick spread
         if sell_price <= buy_price:
-        sell_price = buy_price + 1
+            sell_price = buy_price + 1
 
         # earlier logic
         # buy_price = int(fair_value - spread)
