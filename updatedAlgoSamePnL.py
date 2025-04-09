@@ -193,6 +193,7 @@ class Trader:
                     )  # Amount we can actually sell
                     orders.append(Order(product, int(bid_price), -abs(actual_amount)))
                     sell_order_volume += abs(actual_amount)
+                    sell_quantity -= abs(actual_amount)
                 else:
                     break
 
@@ -214,6 +215,7 @@ class Trader:
                 actual_amount = min(buy_quantity, flatten_amount)
                 orders.append(Order(product, int(ask_price), abs(actual_amount)))
                 buy_order_volume += abs(actual_amount)
+                buy_quantity -= abs(actual_amount)
             else:
                 break
 
