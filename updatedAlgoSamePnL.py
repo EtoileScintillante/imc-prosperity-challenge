@@ -8,6 +8,7 @@ import jsonpickle
 import numpy as np
 import math
 
+
 class Trader:
     def __init__(self):
         # Initialize lists to store historical data
@@ -15,7 +16,14 @@ class Trader:
         self.kelp_vwap = []
         self.squid_log_prices = []
 
-    def resin_orders(self, order_depth: OrderDepth, fair_value: int, take_width: float, position: int, position_limit: int) -> List[Order]:
+    def resin_orders(
+        self,
+        order_depth: OrderDepth,
+        fair_value: int,
+        take_width: float,
+        position: int,
+        position_limit: int,
+    ) -> List[Order]:
         """
         Generate orders for RAINFOREST_RESIN based on a fixed fair value strategy.
 
@@ -29,21 +37,23 @@ class Trader:
         Returns:
             List[Order]: A list of buy/sell orders.
         """
-        orders = [] # Initialize orders list
-        buy_order_volume = 0 # To keep track of the buy and sell volumes
-        sell_order_volume = 0 # Needed to flatten our positions (see flatten() function)
+        orders = []  # Initialize orders list
+        buy_order_volume = 0  # To keep track of the buy and sell volumes
+        sell_order_volume = (
+            0  # Needed to flatten our positions (see flatten() function)
+        )
 
         # Can't trade without a book
         if not order_depth.sell_orders or not order_depth.buy_orders:
-            return orders 
+            return orders
 
-        # Since the value of RESIN does not fluctuate that much, we check for potential 
+        # Since the value of RESIN does not fluctuate that much, we check for potential
         # buy and sell opportunities by checking prices above and below the fair value
         # First we check for buy options
         if len(order_depth.sell_orders) != 0:
             # get best ask price and its amount
             best_ask = min(order_depth.sell_orders.keys())
-            best_ask_amount = -1*order_depth.sell_orders.get(best_ask, 0)
+            best_ask_amount = -1 * order_depth.sell_orders.get(best_ask, 0)
             if best_ask <= fair_value - take_width:
                 quantity = min(best_ask_amount, position_limit - position)
                 if quantity > 0:
@@ -54,40 +64,79 @@ class Trader:
         if len(order_depth.buy_orders) != 0:
             # get best bid price and its amount
             best_bid = max(order_depth.buy_orders.keys())
-            best_bid_amount = order_depth.buy_orders.get(best_bid, 0) # Use .get for safety
+            
+            # Use .get for safety
+            best_bid_amount = order_depth.buy_orders.get(best_bid, 0)
+            #!! Could buy more than just the best one ?
             if best_bid >= fair_value + take_width:
                 quantity = min(best_bid_amount, position_limit + position)
                 if quantity > 0:
                     orders.append(Order("RAINFOREST_RESIN", int(best_bid), -quantity))
                     sell_order_volume += quantity
-        
+
         # Flatten positions (updates buy and sell volumes)
-        buy_order_volume, sell_order_volume = self.flatten(orders, 
-                order_depth, position, position_limit, "RAINFOREST_RESIN", 
-                buy_order_volume, sell_order_volume, fair_value
+        buy_order_volume, sell_order_volume = self.flatten(
+            orders,
+            order_depth,
+            position,
+            position_limit,
+            "RAINFOREST_RESIN",
+            buy_order_volume,
+            sell_order_volume,
+            fair_value,
         )
 
-        # Market Making/Providing liquidity 
+        # Market Making/Providing liquidity
         # we filter for sell prices above fair value (potentially overpriced)
         # and buy prices below fair value (potentially underpriced), then:
         # - we place a buy order at (best_below_bid_fallback + 1) to outbid the current best bid by 1
         # - we place a sell order at (best_above_ask_fallback - 1) to undercut the current best ask by 1
-        sell_candidates = [price for price in order_depth.sell_orders.keys() if price > fair_value]
-        best_above_ask_fallback = min(sell_candidates) if sell_candidates else fair_value + 1
-        buy_candidates = [price for price in order_depth.buy_orders.keys() if price < fair_value]
-        best_below_bid_fallback = max(buy_candidates) if buy_candidates else fair_value - 1
+        sell_candidates = [
+            price for price in order_depth.sell_orders.keys() if price > fair_value
+        ]
+        best_above_ask_fallback = (
+            min(sell_candidates) if sell_candidates else fair_value + 1
+        )
+        buy_candidates = [
+            price for price in order_depth.buy_orders.keys() if price < fair_value
+        ]
+        best_below_bid_fallback = (
+            max(buy_candidates) if buy_candidates else fair_value - 1
+        )
 
-        buy_quantity = position_limit - (position + buy_order_volume) # Calculate amount we can buy
+        buy_quantity = position_limit - (
+            position + buy_order_volume
+        )  # Calculate amount we can buy
         if buy_quantity > 0:
-            orders.append(Order("RAINFOREST_RESIN", int(best_below_bid_fallback + 1), buy_quantity))  # Buy order
+            orders.append(
+                Order(
+                    "RAINFOREST_RESIN", int(best_below_bid_fallback + 1), buy_quantity
+                )
+            )  # Buy order
 
-        sell_quantity = position_limit + (position - sell_order_volume) # Calculate amount we can sell
+        sell_quantity = position_limit + (
+            position - sell_order_volume
+        )  # Calculate amount we can sell
         if sell_quantity > 0:
-            orders.append(Order("RAINFOREST_RESIN", int(best_above_ask_fallback - 1), -sell_quantity))  # Sell order
+            orders.append(
+                Order(
+                    "RAINFOREST_RESIN", int(best_above_ask_fallback - 1), -sell_quantity
+                )
+            )  # Sell order
 
         return orders
-    
-    def flatten(self, orders: List[Order], order_depth: OrderDepth, position: int, position_limit: int, product: str, buy_order_volume: int, sell_order_volume: int, fair_value: float) -> List[Order]:    
+
+    def flatten(
+        self,
+        orders: List[Order],
+        order_depth: OrderDepth,
+        position: int,
+        position_limit: int,
+        product: str,
+        buy_order_volume: int,
+        sell_order_volume: int,
+        fair_value: float,
+    ) -> List[Order]:
         """
         Place position-flattening orders near the fair value to reduce inventory risk.
         This function aims to bring the net position closer to zero (flattening);
@@ -124,24 +173,64 @@ class Trader:
         # If our net position is positive (i.e. we are long), we sell
         # Check if a bot has a buy order out for the price we set
         if net_position > 0:
-            if good_ask_price in order_depth.buy_orders.keys():
-                flatten_amount = min(order_depth.buy_orders[good_ask_price], net_position) # Max amount possible for flatten
-                actual_amount = min(sell_quantity, flatten_amount) # Amount we can actually sell
-                orders.append(Order(product, int(good_ask_price), -abs(actual_amount)))
-                sell_order_volume += abs(actual_amount)
+
+            # TO REMOVE IF BELOW IS OK
+            # if good_ask_price in order_depth.buy_orders.keys():
+            #     flatten_amount = min(order_depth.buy_orders[good_ask_price], net_position) # Max amount possible for flatten
+            #     actual_amount = min(sell_quantity, flatten_amount) # Amount we can actually sell
+            #     orders.append(Order(product, int(good_ask_price), -abs(actual_amount)))
+            #     sell_order_volume += abs(actual_amount)
+
+            # Flattening at best prices
+            buy_prices = sorted(order_depth.buy_orders.keys())
+            for bid_price in buy_prices:
+                if bid_price >= good_ask_price:
+                    flatten_amount = min(
+                        order_depth.buy_orders[bid_price], net_position
+                    )
+                    actual_amount = min(
+                        sell_quantity, flatten_amount
+                    )  # Amount we can actually sell
+                    orders.append(Order(product, int(bid_price), -abs(actual_amount)))
+                    sell_order_volume += abs(actual_amount)
+                else:
+                    break
 
         # If our net position is negative (short), we can buy
         # Check if a bot has a sell order out for the price we set
-        if net_position < 0:
-            if good_bid_price in order_depth.sell_orders.keys():
-                flatten_amount = min(abs(order_depth.sell_orders[good_bid_price]), abs(net_position)) # Max amount possible for flatten
-                actual_amount = min(buy_quantity, flatten_amount) # Amount we can actually buy
-                orders.append(Order(product, int(good_bid_price), abs(actual_amount)))
+
+        # if net_position < 0:
+        #     if good_bid_price in order_depth.sell_orders.keys():
+        #         flatten_amount = min(abs(order_depth.sell_orders[good_bid_price]), abs(net_position)) # Max amount possible for flatten
+        #         actual_amount = min(buy_quantity, flatten_amount) # Amount we can actually buy
+        #         orders.append(Order(product, int(good_bid_price), abs(actual_amount)))
+        #         buy_order_volume += abs(actual_amount)
+        sell_prices = sorted(order_depth.sell_orders.keys())
+        for ask_price in sell_prices:
+            if ask_price <= good_bid_price:
+                flatten_amount = min(
+                    abs(order_depth.sell_orders[ask_price]), abs(net_position)
+                )
+                actual_amount = min(buy_quantity, flatten_amount)
+                orders.append(Order(product, int(ask_price), abs(actual_amount)))
                 buy_order_volume += abs(actual_amount)
-        
+            else:
+                break
+
         return buy_order_volume, sell_order_volume
-    
-    def kelp_orders(self, order_depth: OrderDepth, timespan: int, take_width: float, position: int, position_limit: int, min_vol_threshold: int, vwap: bool, prevent_adverse: bool, adverse_volume: int) -> List[Order]:
+
+    def kelp_orders(
+        self,
+        order_depth: OrderDepth,
+        timespan: int,
+        take_width: float,
+        position: int,
+        position_limit: int,
+        min_vol_threshold: int,
+        vwap: bool,
+        prevent_adverse: bool,
+        adverse_volume: int,
+    ) -> List[Order]:
         """
         Generate orders for KELP based on filtered midpoint or VWAP.
 
@@ -158,9 +247,11 @@ class Trader:
         Returns:
             List[Order]: A list of KELP orders.
         """
-        orders = [] # Initialize orders list
-        buy_order_volume = 0 # To keep track of the buy and sell volumes
-        sell_order_volume = 0 # Needed to flatten our positions (see flatten() function)
+        orders = []  # Initialize orders list
+        buy_order_volume = 0  # To keep track of the buy and sell volumes
+        sell_order_volume = (
+            0  # Needed to flatten our positions (see flatten() function)
+        )
 
         if not order_depth.sell_orders or not order_depth.buy_orders:
             return orders  # Can't trade without a book
@@ -169,8 +260,16 @@ class Trader:
         # Otherwise the estimated fair value for KELP will be based on a midpoint:
         # best_valid_ask + best_valid_bid divided by 2
         # So first we filter the valid asks and bids (valid meaning enough volume)
-        valid_asks = [price for price, volume in order_depth.sell_orders.items() if abs(volume) >= min_vol_threshold]
-        valid_bids = [price for price, volume in order_depth.buy_orders.items() if abs(volume) >= min_vol_threshold]
+        valid_asks = [
+            price
+            for price, volume in order_depth.sell_orders.items()
+            if abs(volume) >= min_vol_threshold
+        ]
+        valid_bids = [
+            price
+            for price, volume in order_depth.buy_orders.items()
+            if abs(volume) >= min_vol_threshold
+        ]
 
         # If valid_asks/valid_bids is empty, we just take the best available, ignoring the volume
         best_ask = min(order_depth.sell_orders)
@@ -189,8 +288,8 @@ class Trader:
         volume = -order_depth.sell_orders[best_ask] + order_depth.buy_orders[best_bid]
         if volume != 0:
             spot_vwap = (
-                best_bid * order_depth.buy_orders[best_bid] + 
-                best_ask * -order_depth.sell_orders[best_ask]
+                best_bid * order_depth.buy_orders[best_bid]
+                + best_ask * -order_depth.sell_orders[best_ask]
             ) / volume
         else:
             spot_vwap = midpoint  # fallback
@@ -210,7 +309,9 @@ class Trader:
             # For this we need the total volume
             total_volume = sum(x["vol"] for x in self.kelp_vwap)
             if total_volume > 0:
-                fair_value = sum(x["vwap"] * x["vol"] for x in self.kelp_vwap) / total_volume
+                fair_value = (
+                    sum(x["vwap"] * x["vol"] for x in self.kelp_vwap) / total_volume
+                )
             else:
                 fair_value = midpoint
         else:
@@ -219,21 +320,34 @@ class Trader:
         # Market-taking logic
         if best_valid_ask in order_depth.sell_orders:
             ask_volume = -order_depth.sell_orders[best_valid_ask]
-            if best_valid_ask <= fair_value - take_width and (not prevent_adverse or ask_volume <= adverse_volume):
+            if best_valid_ask <= fair_value - take_width and (
+                not prevent_adverse or ask_volume <= adverse_volume
+            ):
                 quantity = min(ask_volume, position_limit - position)
                 if quantity > 0:
                     orders.append(Order("KELP", int(best_valid_ask), quantity))
                     buy_order_volume += quantity
         if best_valid_bid in order_depth.buy_orders:
             bid_volume = order_depth.buy_orders[best_valid_bid]
-            if best_valid_bid >= fair_value + take_width and (not prevent_adverse or bid_volume <= adverse_volume):
+            if best_valid_bid >= fair_value + take_width and (
+                not prevent_adverse or bid_volume <= adverse_volume
+            ):
                 quantity = min(bid_volume, position_limit + position)
                 if quantity > 0:
                     orders.append(Order("KELP", int(best_valid_bid), -quantity))
                     sell_order_volume += quantity
 
         # Flatten
-        buy_order_volume, sell_order_volume = self.flatten(orders, order_depth, position, position_limit, "KELP", buy_order_volume, sell_order_volume, fair_value)
+        buy_order_volume, sell_order_volume = self.flatten(
+            orders,
+            order_depth,
+            position,
+            position_limit,
+            "KELP",
+            buy_order_volume,
+            sell_order_volume,
+            fair_value,
+        )
 
         # Passive orders (liquidity provision)
         # We post passive limit orders to provide liquidity
@@ -244,25 +358,33 @@ class Trader:
         passive_ask = min(passive_asks) if passive_asks else fair_value + 2
         passive_bid = max(passive_bids) if passive_bids else fair_value - 2
 
-        buy_quantity = position_limit - (position + buy_order_volume) # Amount we can buy
+        buy_quantity = position_limit - (
+            position + buy_order_volume
+        )  # Amount we can buy
         if buy_quantity > 0:
             orders.append(Order("KELP", int(passive_bid + 1), buy_quantity))
 
-        sell_quantity = position_limit + (position - sell_order_volume) # Amount we can sell
+        sell_quantity = position_limit + (
+            position - sell_order_volume
+        )  # Amount we can sell
         if sell_quantity > 0:
             orders.append(Order("KELP", int(passive_ask - 1), -sell_quantity))
 
         return orders
-    
-    def squid_orders(self, order_depth: OrderDepth, position: int, position_limit: int,
-                     timespan: int = 20, # Increased default timespan for volatility calc
-                     base_take_width: float = 2.0, # Base deviation for taking
-                     volatility_take_factor: float = 50.0, # Factor scaling take_width with volatility
-                     base_passive_spread: int = 2, # Minimum passive spread in ticks
-                     volatility_spread_factor: float = 50.0, # Factor scaling passive spread with volatility
-                     volatility_size_factor: float = 50.0, # Factor scaling passive size with volatility (inverse)
-                     min_passive_volume: int = 5 # Minimum size for passive orders
-                     ) -> List[Order]:
+
+    def squid_orders(
+        self,
+        order_depth: OrderDepth,
+        position: int,
+        position_limit: int,
+        timespan: int = 20,  # Increased default timespan for volatility calc
+        base_take_width: float = 2.0,  # Base deviation for taking
+        volatility_take_factor: float = 50.0,  # Factor scaling take_width with volatility
+        base_passive_spread: int = 2,  # Minimum passive spread in ticks
+        volatility_spread_factor: float = 50.0,  # Factor scaling passive spread with volatility
+        volatility_size_factor: float = 50.0,  # Factor scaling passive size with volatility (inverse)
+        min_passive_volume: int = 5,  # Minimum size for passive orders
+    ) -> List[Order]:
         """
         Strategy for trading SQUID_INK, a highly volatile asset, using insights from the Rough Fractional Stochastic Volatility (RFSV) model.
 
@@ -288,7 +410,7 @@ class Trader:
         sell_order_volume = 0
 
         if not order_depth.sell_orders or not order_depth.buy_orders:
-            return orders # Can't trade without a book
+            return orders  # Can't trade without a book
 
         # Get best bid and ask prices and calculate midpoint price
         best_ask = min(order_depth.sell_orders.keys())
@@ -314,7 +436,7 @@ class Trader:
             volatility = np.std(log_returns)
         else:
             # Use a default non-zero volatility if history is too short
-            volatility = 0.005 # Can test with other values
+            volatility = 0.005  # Can test with other values
 
         # Calculate dynamic take width --> increases with volatility
         # Requires larger deviation from fair value to take aggressively in volatile markets
@@ -323,12 +445,18 @@ class Trader:
         # Calculate dynamic passive spread --> also increases with volatility
         # Quote wider in volatile markets to reduce adverse selection risk
         # Ensure spread is at least the base minimum
-        spread = max(base_passive_spread, round(base_passive_spread + volatility * volatility_spread_factor))
+        spread = max(
+            base_passive_spread,
+            round(base_passive_spread + volatility * volatility_spread_factor),
+        )
 
         # Calculate dynamic passive volume size --> decreases with volatility (inverse scaling)
         # Quote smaller size when risk (volatility) is high
         # we use max() to ensure a minimum quoting size and add 1 to denominator to prevent division by zero if vola is near zero
-        max_passive_volume = max(min_passive_volume, round(position_limit / (volatility * volatility_size_factor + 1)))
+        max_passive_volume = max(
+            min_passive_volume,
+            round(position_limit / (volatility * volatility_size_factor + 1)),
+        )
 
         # Market Taking:
         # Buy if best ask is significantly below fair value
@@ -339,22 +467,29 @@ class Trader:
                 quantity_to_buy = min(ask_volume, position_limit - position)
                 if quantity_to_buy > 0:
                     orders.append(Order("SQUID_INK", int(best_ask), quantity_to_buy))
-                    buy_order_volume += quantity_to_buy 
+                    buy_order_volume += quantity_to_buy
 
         # Sell if best bid is significantly above fair value
         if best_bid >= fair_value + take_width:
-             # Get volume available at best bid
+            # Get volume available at best bid
             bid_volume = order_depth.buy_orders.get(best_bid, 0)
             if bid_volume > 0:
-                quantity_to_sell = min(bid_volume, position_limit + position) 
+                quantity_to_sell = min(bid_volume, position_limit + position)
                 if quantity_to_sell > 0:
                     orders.append(Order("SQUID_INK", int(best_bid), -quantity_to_sell))
-                    sell_order_volume += quantity_to_sell 
+                    sell_order_volume += quantity_to_sell
 
         # Flatten
-        buy_order_volume, sell_order_volume = self.flatten(orders, order_depth, 
-                                              position, position_limit, "SQUID_INK",
-                                              buy_order_volume, sell_order_volume, fair_value)
+        buy_order_volume, sell_order_volume = self.flatten(
+            orders,
+            order_depth,
+            position,
+            position_limit,
+            "SQUID_INK",
+            buy_order_volume,
+            sell_order_volume,
+            fair_value,
+        )
 
         # Passive Market Making:
         # Calculate buy and sell prices using the dynamic spread
@@ -372,10 +507,14 @@ class Trader:
 
         # Determine final passive order volume, using dynamic max size and respecting capacity
         buy_volume_passive = min(max_passive_volume, remaining_buy_capacity)
-        buy_volume_passive = max(0, buy_volume_passive) # Make surte this is non-negative
+        buy_volume_passive = max(
+            0, buy_volume_passive
+        )  # Make surte this is non-negative
 
         sell_volume_passive = min(max_passive_volume, remaining_sell_capacity)
-        sell_volume_passive = max(0, sell_volume_passive) # Make surte this is non-negative
+        sell_volume_passive = max(
+            0, sell_volume_passive
+        )  # Make surte this is non-negative
 
         # Buy order
         if buy_volume_passive > 0:
@@ -386,7 +525,6 @@ class Trader:
             orders.append(Order("SQUID_INK", sell_price, -sell_volume_passive))
 
         return orders
-    
 
     def run(self, state: TradingState):
         result = {}
@@ -410,17 +548,25 @@ class Trader:
         kelp_adverse_volume = 20
 
         squid_position_limit = 50
-        squid_volatility_timespan = 20 # Lookback window for volatility calc
-        squid_base_take_width = 2.0 # Minimum deviation to take
-        squid_volatility_take_factor = 50.0 # How much take_width increases with vol
-        squid_base_passive_spread = 1 # Minimum passive spread 
-        squid_volatility_spread_factor = 50.0 # How much passive spread increases with vol
-        squid_volatility_size_factor = 50.0 # How much passive size decreases with vol
-        squid_min_passive_volume = 5 # Minimum size for passive orders
+        squid_volatility_timespan = 20  # Lookback window for volatility calc
+        squid_base_take_width = 2.0  # Minimum deviation to take
+        squid_volatility_take_factor = 50.0  # How much take_width increases with vol
+        squid_base_passive_spread = 1  # Minimum passive spread
+        squid_volatility_spread_factor = (
+            50.0  # How much passive spread increases with vol
+        )
+        squid_volatility_size_factor = 50.0  # How much passive size decreases with vol
+        squid_min_passive_volume = 5  # Minimum size for passive orders
 
         if "RAINFOREST_RESIN" in state.order_depths:
             resin_position = state.position.get("RAINFOREST_RESIN", 0)
-            resin_orders = self.resin_orders(state.order_depths["RAINFOREST_RESIN"], resin_fair_value, resin_take_width, resin_position, resin_position_limit)
+            resin_orders = self.resin_orders(
+                state.order_depths["RAINFOREST_RESIN"],
+                resin_fair_value,
+                resin_take_width,
+                resin_position,
+                resin_position_limit,
+            )
             result["RAINFOREST_RESIN"] = resin_orders
 
         if "KELP" in state.order_depths:
@@ -431,33 +577,35 @@ class Trader:
                 take_width=kelp_take_width,
                 position=kelp_position,
                 position_limit=kelp_position_limit,
-                min_vol_threshold=kelp_min_vol_thresh, # Added missing param
+                min_vol_threshold=kelp_min_vol_thresh,  # Added missing param
                 vwap=kelp_vwap,
                 prevent_adverse=kelp_prevent_adverse,
-                adverse_volume=kelp_adverse_volume   # Corrected order
+                adverse_volume=kelp_adverse_volume,  # Corrected order
             )
             result["KELP"] = kelp_orders
 
         if "SQUID_INK" in state.order_depths:
             squid_position = state.position.get("SQUID_INK", 0)
             squid_orders = self.squid_orders(
-                 order_depth=state.order_depths["SQUID_INK"],
-                 position=squid_position,
-                 position_limit=squid_position_limit,
-                 timespan=squid_volatility_timespan,
-                 base_take_width=squid_base_take_width,
-                 volatility_take_factor=squid_volatility_take_factor,
-                 base_passive_spread=squid_base_passive_spread,
-                 volatility_spread_factor=squid_volatility_spread_factor,
-                 volatility_size_factor=squid_volatility_size_factor,
-                 min_passive_volume=squid_min_passive_volume
+                order_depth=state.order_depths["SQUID_INK"],
+                position=squid_position,
+                position_limit=squid_position_limit,
+                timespan=squid_volatility_timespan,
+                base_take_width=squid_base_take_width,
+                volatility_take_factor=squid_volatility_take_factor,
+                base_passive_spread=squid_base_passive_spread,
+                volatility_spread_factor=squid_volatility_spread_factor,
+                volatility_size_factor=squid_volatility_size_factor,
+                min_passive_volume=squid_min_passive_volume,
             )
             result["SQUID_INK"] = squid_orders
 
-        traderData = jsonpickle.encode({
-            "kelp_prices": self.kelp_prices,
-            "kelp_vwap": self.kelp_vwap,
-            "squid_log_prices": self.squid_log_prices
-        })
+        traderData = jsonpickle.encode(
+            {
+                "kelp_prices": self.kelp_prices,
+                "kelp_vwap": self.kelp_vwap,
+                "squid_log_prices": self.squid_log_prices,
+            }
+        )
         conversions = 0
         return result, conversions, traderData
