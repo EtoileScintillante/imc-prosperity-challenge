@@ -10,13 +10,6 @@ import collections
 import numpy as np
 import math
 
-# This file is mixture of copy_trial and our own updatedAlgoV2_final
-# I kept the function for the old products the same
-# As for basket1, that function is adapted from a 2023 top team
-# I have tried it for basket2, but that did not work at all
-# Check analysis.ipynb to see how different basket1 and basket2 are
-# I think basket2 requires a different approach
-
 class Product:
     RAINFOREST_RESIN = "RAINFOREST_RESIN"
     KELP = "KELP"
@@ -42,7 +35,9 @@ BASKET2_WEIGHTS = {
 
 class Trader:
     def __init__(self):
-        self.historical_spread = []
+        #self.correlation_b1_b2 = []
+        self.b1_prices = []
+        self.b2_prices = []
         self.squid_log_prices = []
         self.kelp_prices = []
         self.kelp_vwap = []
@@ -485,25 +480,21 @@ class Trader:
             )  # Sell order
 
         return orders
-    
-    def basket1_orders(self, order_depth, position):
-        # Hi all, I adapted this code from pone 2023's top teams.
-        # Back in 2023 they had one picnic basket to trade and the movement 
-        # of its price is similar to basket1 of this year. 
-        # We don't do a full basket arbitrage, bc in that case we would:
-	    #  - Buy the basket, sell the components (or vice versa).
-	    #  - Maintain a neutral overall position.
-        # In this function, we compare the maid price of basket1 to a synthetic price calculated from the prices of its components
-        # Then, we buy the basket if it’s underpriced vs. the synthetic. Or sell the basket if it’s overpriced.
-        # So we only trade the basket!
 
-        orders = []
+    def basket_orders(self, order_depth, position_b1, position_b2, corr_window=100):
+        # This version uses basket1 synthetic signal to trade both baskets
+        # It also uses correlation to determine the direction of B2
+        # As long as the correlation is high, we trade B2 in the same direction as B1
+        # Otherwise we trade B2 in the opposite direction
+        # It works pretty well on the 'training data'
+        orders_b1 = []
+        orders_b2 = []
 
         # Dicts to store osell, obuy: orderbooks sorted, best_*: best prices, worst_*: worst prices and mid_price
-        prods = ['JAMS', 'CROISSANTS', 'DJEMBES', 'PICNIC_BASKET1']
+        prods = ['JAMS', 'CROISSANTS', 'DJEMBES', 'PICNIC_BASKET1', 'PICNIC_BASKET2']
         osell, obuy, best_sell, best_buy, worst_sell, worst_buy, mid_price = {}, {}, {}, {}, {}, {}, {}
-        
-        # Loop through each product and get price info
+
+        # Extract prices
         for p in prods:
             osell[p] = collections.OrderedDict(sorted(order_depth[p].sell_orders.items()))
             obuy[p] = collections.OrderedDict(sorted(order_depth[p].buy_orders.items(), reverse=True))
@@ -514,28 +505,57 @@ class Trader:
             worst_buy[p] = next(reversed(obuy[p]))
 
             mid_price[p] = (best_sell[p] + best_buy[p]) / 2
-        
-        # Calculate spread between mid basket price and synthetic price
-        spread_buy = mid_price['PICNIC_BASKET1'] - 3 * mid_price['JAMS'] - 6 * mid_price['CROISSANTS'] - mid_price['DJEMBES']
-        spread_sell = spread_buy  # Same calculation used both directions
+
+        # Save prices for correlation
+        self.b1_prices.append(mid_price['PICNIC_BASKET1'])
+        self.b2_prices.append(mid_price['PICNIC_BASKET2'])
+
+        # Keep window size fixed
+        if len(self.b1_prices) > corr_window:
+            self.b1_prices.pop(0)
+            self.b2_prices.pop(0)
+
+        # Default to high correlation until we have enough data
+        correlation = 1.0
+        if len(self.b1_prices) == corr_window:
+            correlation = np.corrcoef(self.b1_prices, self.b2_prices)[0, 1]
+
+        # Compute spread between B1 and its synthetic value
+        spread = mid_price['PICNIC_BASKET1'] - (
+            3 * mid_price['JAMS'] + 6 * mid_price['CROISSANTS'] + mid_price['DJEMBES']
+        )
 
         # Set a threshold for how big the mispricing must be before trading
         trade_at = self.basket1_std * 0.5 # This 0.5 is also from the 2023 code, haven't tried other values yet
 
-        # Sell signal
-        if spread_sell > trade_at:
-            vol = self.LIMIT['PICNIC_BASKET1'] + position
-            if vol > 0:
-                orders.append(Order('PICNIC_BASKET1', worst_buy['PICNIC_BASKET1'], -vol))
-                position -= vol
-        # Buy signal
-        elif spread_buy < -trade_at:
-            vol = self.LIMIT['PICNIC_BASKET1'] - position
-            if vol > 0:
-                orders.append(Order('PICNIC_BASKET1', worst_sell['PICNIC_BASKET1'], vol))
-                position += vol
+        # Determine trading direction for B2 based on correlation
+        same_direction = correlation > 0.3 # started with 0.7, just trying random values
 
-        return orders
+        # SELL signal
+        if spread > trade_at:
+            vol_b1 = self.LIMIT['PICNIC_BASKET1'] + position_b1
+            if vol_b1 > 0:
+                orders_b1.append(Order('PICNIC_BASKET1', worst_buy['PICNIC_BASKET1'], -vol_b1))
+
+            vol_b2 = self.LIMIT['PICNIC_BASKET2'] + position_b2
+            if vol_b2 > 0:
+                action = -vol_b2 if same_direction else vol_b2
+                price = worst_buy['PICNIC_BASKET2'] if same_direction else worst_sell['PICNIC_BASKET2']
+                orders_b2.append(Order('PICNIC_BASKET2', price, action))
+
+        # BUY signal
+        elif spread < -trade_at:
+            vol_b1 = self.LIMIT['PICNIC_BASKET1'] - position_b1
+            if vol_b1 > 0:
+                orders_b1.append(Order('PICNIC_BASKET1', worst_sell['PICNIC_BASKET1'], vol_b1))
+
+            vol_b2 = self.LIMIT['PICNIC_BASKET2'] - position_b2
+            if vol_b2 > 0:
+                action = vol_b2 if same_direction else -vol_b2
+                price = worst_sell['PICNIC_BASKET2'] if same_direction else worst_buy['PICNIC_BASKET2']
+                orders_b2.append(Order('PICNIC_BASKET2', price, action))
+
+        return orders_b1, orders_b2
 
 
     def run(self, state: TradingState):
@@ -555,10 +575,16 @@ class Trader:
 
         
         if Product.PICNIC_BASKET1 in state.order_depths:
-             position = state.position.get(Product.PICNIC_BASKET1, 0)
-             basket1_orders = self.basket1_orders(order_depth=state.order_depths,
-                 position=position)
-             result[Product.PICNIC_BASKET1] = basket1_orders
+            position_b1 = state.position.get(Product.PICNIC_BASKET1, 0)
+            position_b2 = state.position.get(Product.PICNIC_BASKET2, 0)
+            orders_b1, orders_b2 = self.basket_orders(
+                order_depth=state.order_depths,
+                position_b1=position_b1,
+                position_b2=position_b2,
+                corr_window=300 # Long window for correlation
+            )
+            result[Product.PICNIC_BASKET1] = orders_b1
+            result[Product.PICNIC_BASKET2] = orders_b2
         
 
         if "RAINFOREST_RESIN" in state.order_depths:
@@ -599,7 +625,8 @@ class Trader:
 
 
         conversions = 0
-        traderData = jsonpickle.encode({"historical_spread": self.historical_spread, 
+        traderData = jsonpickle.encode({"b1_prices": self.b1_prices,
+                                        "b2_prices": self.b2_prices,
                                         "squid_log_prices": self.squid_log_prices,
                                         "kelp_prices": self.kelp_prices,
                                         "kelp_vwap": self.kelp_vwap
