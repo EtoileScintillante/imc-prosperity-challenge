@@ -31,21 +31,10 @@ class Product:
     MAGNIFICENT_MACARONS = "MAGNIFICENT_MACARONS"
 
 PARAMS = {
-    Product.VOLCANIC_ROCK: {
-        "take_width": 0, # spread is like non-existant so 0 is okay here
-        "clear_width": 0,
-        "prevent_adverse": True,
-        "adverse_volume": 85,
-        "reversion_beta": 0.02305, # analysis.ipynb
-        "disregard_edge": 1,
-        "join_edge": 2,
-        "default_edge": 1,
-        "soft_position_limit": 170,
-    },
     Product.RAINFOREST_RESIN: {
         "fair_value": 10000,
         "take_width": 3,
-        "clear_width": 0,
+        "clear_width": 1,
         # for making
         "disregard_edge": 1,  # disregards orders for joining or pennying within this value from fair
         "join_edge": 2,  # joins orders within this edge
@@ -57,7 +46,7 @@ PARAMS = {
         "clear_width": 0,
         "prevent_adverse": True,
         "adverse_volume": 15,
-        "reversion_beta": -0.48297, # analysis.ipynb
+        "reversion_beta": -0.47065, # analysis_beta&BSM&trades.ipynb
         "disregard_edge": 1,
         "join_edge": 2,
         "default_edge": 1,
@@ -67,7 +56,7 @@ PARAMS = {
         "clear_width": 0,
         "prevent_adverse": True,
         "adverse_volume": 15,
-        "reversion_beta": -0.0731067, # analysis.ipynb
+        "reversion_beta": -0.08562, # analysis_beta&BSM&trades.ipynb
         "disregard_edge": 1,
         "join_edge": 2,
         "default_edge": 2,
@@ -75,15 +64,15 @@ PARAMS = {
     },
     # For window, zscore threshold and target position: same as what team LU used
     Product.SPREAD1: {
-        "default_spread_mean": 10.8104,#57.6585, # analysis.ipynb
-        "default_spread_std": 80.6083,  # analysis.ipynb
+        "default_spread_mean": -38.2404, # analysis_beta&BSM&trades.ipynb
+        "default_spread_std": 72.8356,   # analysis_beta&BSM&trades.ipynb
         "spread_std_window": 45,
-        "zscore_threshold": 7,
+        "zscore_threshold": 10,
         "target_position": 58 
     },
     Product.SPREAD2: {
-        "default_spread_mean": -4442.0282, # analysis.ipynb
-        "default_spread_std": 68.2446,     # analysis.ipynb
+        "default_spread_mean": -4364.8644, # analysis_beta&BSM&trades.ipynb
+        "default_spread_std": 71.6103,     # analysis_beta&BSM&trades.ipynb
         "spread_std_window": 45,
         "zscore_threshold": 7,
         "target_position": 98
@@ -793,7 +782,7 @@ class Trader:
 
         rock_position = state.position.get(Product.VOLCANIC_ROCK, 0)
         timestamp = state.timestamp
-        TTE = (4 - timestamp / 1_000_000) / 365
+        TTE = (3 - timestamp / 1_000_000) / 365
         if TTE <= 0:
             return []
 
@@ -818,7 +807,7 @@ class Trader:
             net_delta += delta * pos
 
         hedge_needed = round(net_delta - rock_position)
-        hedge_threshold = 2.5 #3
+        hedge_threshold = 3
         orders = []
         if abs(hedge_needed) >= hedge_threshold:
             rock_depth = state.order_depths[Product.VOLCANIC_ROCK]
@@ -861,7 +850,7 @@ class Trader:
 
         return orders
 
-    def macaron_convert(self, state: TradingState, CSI_threshold: float = 41) -> int:
+    def macaron_convert(self, state: TradingState, CSI_threshold: float = 40) -> int:
         """Determine whether to import/export macarons based on CSI and profitability."""
         obs = state.observations.conversionObservations.get(Product.MAGNIFICENT_MACARONS)
         if not obs or Product.MAGNIFICENT_MACARONS not in state.order_depths:
@@ -899,32 +888,52 @@ class Trader:
         
         # RESIN orders
         if Product.RAINFOREST_RESIN in self.params and Product.RAINFOREST_RESIN in state.order_depths:
-            resin_position = (
-                state.position[Product.RAINFOREST_RESIN]
-                if Product.RAINFOREST_RESIN in state.position
-                else 0
+            resin_orders = []
+
+            # Mirror Charlie's trades
+            # Or be counterparty of known bad traders
+            if Product.RAINFOREST_RESIN in state.market_trades:
+                for trade in state.market_trades[Product.RAINFOREST_RESIN]:
+                    resin_position = state.position.get(Product.RAINFOREST_RESIN, 0)
+                    limit = self.LIMIT[Product.RAINFOREST_RESIN]
+
+                    # Charlie buys → we buy
+                    # Or: Paris sells (Paris often sells RESIN low)
+                    if trade.buyer == "Charlie" or trade.seller == "Paris":
+                        best_ask = min(state.order_depths[Product.RAINFOREST_RESIN].sell_orders.keys(), default=None)
+                        if best_ask is not None:
+                            qty = min(limit - resin_position, 1)
+                            if qty > 0:
+                                resin_orders.append(Order(Product.RAINFOREST_RESIN, best_ask, qty))
+
+                    # Charlie sells → we sell
+                    if trade.seller == "Charlie":
+                        best_bid = max(state.order_depths[Product.RAINFOREST_RESIN].buy_orders.keys(), default=None)
+                        if best_bid is not None:
+                            qty = min(limit + resin_position, 1)
+                            if qty > 0:
+                                resin_orders.append(Order(Product.RAINFOREST_RESIN, best_bid, -qty))
+
+            resin_position = state.position.get(Product.RAINFOREST_RESIN, 0)
+
+            resin_take_orders, buy_order_volume, sell_order_volume = self.take_orders(
+                Product.RAINFOREST_RESIN,
+                state.order_depths[Product.RAINFOREST_RESIN],
+                self.params[Product.RAINFOREST_RESIN]["fair_value"],
+                self.params[Product.RAINFOREST_RESIN]["take_width"],
+                resin_position,
             )
-            
-            resin_take_orders, buy_order_volume, sell_order_volume = (
-                self.take_orders(
-                    Product.RAINFOREST_RESIN,
-                    state.order_depths[Product.RAINFOREST_RESIN],
-                    self.params[Product.RAINFOREST_RESIN]["fair_value"],
-                    self.params[Product.RAINFOREST_RESIN]["take_width"],
-                    resin_position,
-                )
+
+            resin_clear_orders, buy_order_volume, sell_order_volume = self.clear_orders(
+                Product.RAINFOREST_RESIN,
+                state.order_depths[Product.RAINFOREST_RESIN],
+                self.params[Product.RAINFOREST_RESIN]["fair_value"],
+                self.params[Product.RAINFOREST_RESIN]["clear_width"],
+                resin_position,
+                buy_order_volume,
+                sell_order_volume,
             )
-            resin_clear_orders, buy_order_volume, sell_order_volume = (
-                self.clear_orders(
-                    Product.RAINFOREST_RESIN,
-                    state.order_depths[Product.RAINFOREST_RESIN],
-                    self.params[Product.RAINFOREST_RESIN]["fair_value"],
-                    self.params[Product.RAINFOREST_RESIN]["clear_width"],
-                    resin_position,
-                    buy_order_volume,
-                    sell_order_volume,
-                )
-            )
+
             resin_make_orders, _, _ = self.make_orders(
                 Product.RAINFOREST_RESIN,
                 state.order_depths[Product.RAINFOREST_RESIN],
@@ -938,55 +947,76 @@ class Trader:
                 True,
                 self.params[Product.RAINFOREST_RESIN]["soft_position_limit"],
             )
+
             result[Product.RAINFOREST_RESIN] = (
-                resin_take_orders + resin_clear_orders + resin_make_orders
+                resin_orders + resin_take_orders + resin_clear_orders + resin_make_orders
             )
 
         # KELP orders
         if Product.KELP in self.params and Product.KELP in state.order_depths:
-            KELP_position = (
-                state.position[Product.KELP]
-                if Product.KELP in state.position
-                else 0
-            )
-            KELP_fair_value = self.KELP_fair_value(
-                state.order_depths[Product.KELP], traderObject
-            )
-            KELP_take_orders, buy_order_volume, sell_order_volume = (
-                self.take_orders(
-                    Product.KELP,
-                    state.order_depths[Product.KELP],
-                    KELP_fair_value,
-                    self.params[Product.KELP]["take_width"],
-                    KELP_position,
-                    self.params[Product.KELP]["prevent_adverse"],
-                    self.params[Product.KELP]["adverse_volume"],
-                )
-            )
-            KELP_clear_orders, buy_order_volume, sell_order_volume = (
-                self.clear_orders(
-                    Product.KELP,
-                    state.order_depths[Product.KELP],
-                    KELP_fair_value,
-                    self.params[Product.KELP]["clear_width"],
-                    KELP_position,
-                    buy_order_volume,
-                    sell_order_volume,
-                )
-            )
-            KELP_make_orders, _, _ = self.make_orders(
+            kelp_orders = []
+
+            # Mirror Charlie's trades
+            # Or be counterparty known bad traders
+            if Product.KELP in state.market_trades:
+                for trade in state.market_trades[Product.KELP]:
+                    kelp_position = state.position.get(Product.KELP, 0)
+                    limit = self.LIMIT[Product.KELP]
+
+                    # Charlie buys → we buy
+                    # For Paris and Gary we do the opposite
+                    if trade.buyer == "Charlie" or trade.seller == "Paris":
+                        best_ask = min(state.order_depths[Product.KELP].sell_orders.keys(), default=None)
+                        if best_ask is not None:
+                            qty = min(limit - kelp_position, 1)
+                            if qty > 0:
+                                kelp_orders.append(Order(Product.KELP, best_ask, qty))
+
+                    # Charlie sells → we sell, or Paris buys --> we sell
+                    if trade.seller == "Charlie" or trade.buyer == "Paris":
+                        best_bid = max(state.order_depths[Product.KELP].buy_orders.keys(), default=None)
+                        if best_bid is not None:
+                            qty = min(limit + kelp_position, 1)
+                            if qty > 0:
+                                kelp_orders.append(Order(Product.KELP, best_bid, -qty))
+
+            # Combine with your standard strategy
+            kelp_position = state.position.get(Product.KELP, 0)
+            kelp_fair_value = self.KELP_fair_value(state.order_depths[Product.KELP], traderObject)
+
+            kelp_take_orders, buy_order_volume, sell_order_volume = self.take_orders(
                 Product.KELP,
                 state.order_depths[Product.KELP],
-                KELP_fair_value,
-                KELP_position,
+                kelp_fair_value,
+                self.params[Product.KELP]["take_width"],
+                kelp_position,
+                self.params[Product.KELP]["prevent_adverse"],
+                self.params[Product.KELP]["adverse_volume"],
+            )
+            kelp_clear_orders, buy_order_volume, sell_order_volume = self.clear_orders(
+                Product.KELP,
+                state.order_depths[Product.KELP],
+                kelp_fair_value,
+                self.params[Product.KELP]["clear_width"],
+                kelp_position,
+                buy_order_volume,
+                sell_order_volume,
+            )
+            kelp_make_orders, _, _ = self.make_orders(
+                Product.KELP,
+                state.order_depths[Product.KELP],
+                kelp_fair_value,
+                kelp_position,
                 buy_order_volume,
                 sell_order_volume,
                 self.params[Product.KELP]["disregard_edge"],
                 self.params[Product.KELP]["join_edge"],
                 self.params[Product.KELP]["default_edge"],
             )
+
+            # Combine everything
             result[Product.KELP] = (
-                KELP_take_orders + KELP_clear_orders + KELP_make_orders
+                kelp_orders + kelp_take_orders + kelp_clear_orders + kelp_make_orders
             )
 
         # SQUID orders
@@ -1002,6 +1032,8 @@ class Trader:
             SQUID_INK_fair_value = self.SQUID_INK_fair_value(
                 state.order_depths[Product.SQUID_INK], traderObject
             )
+
+            SQUID_INK_spike = self.detect_spike(SQUID_INK_fair_value)
             SQUID_INK_take_orders, buy_order_volume, sell_order_volume = (
                 self.take_orders(
                     Product.SQUID_INK,
@@ -1011,6 +1043,7 @@ class Trader:
                     SQUID_INK_position,
                     self.params[Product.SQUID_INK]["prevent_adverse"],
                     self.params[Product.SQUID_INK]["adverse_volume"],
+                    spike=SQUID_INK_spike
                 )
             )
             SQUID_INK_clear_orders, buy_order_volume, sell_order_volume = (
@@ -1075,10 +1108,10 @@ class Trader:
         # This is the end result
         self.voucher_zscore_threshold = {
             Product.VOLCANIC_ROCK_VOUCHER_9500: 1.5,
-            Product.VOLCANIC_ROCK_VOUCHER_9750: 1.6,
+            Product.VOLCANIC_ROCK_VOUCHER_9750: 1.3,#1.6,
             Product.VOLCANIC_ROCK_VOUCHER_10000: 1.35,
             Product.VOLCANIC_ROCK_VOUCHER_10250: 2.0,
-            Product.VOLCANIC_ROCK_VOUCHER_10500: 0.0 # no matter what value, this voucher nevers trades in bt
+            Product.VOLCANIC_ROCK_VOUCHER_10500: 0.0  # no matter what value, this voucher never trades in BT
         } 
 
         # VOUCHER orders
@@ -1161,13 +1194,15 @@ class Trader:
             else:
                 result[Product.VOLCANIC_ROCK] = hedge_orders
         
-        # MACARON orders
+        # !!!!!!!FOR ACTUAL SUBMISSION WE MUST MAKE SURE TO ADJUST THESE VALUES AGAIN!!!!!!!
+        # MACARON orders (no new order when end nears! Then we flatten) < 999700
         conversions = 0
-        result[Product.MAGNIFICENT_MACARONS] = self.macaron_order(state)
-        conversions = self.macaron_convert(state)
+        if state.timestamp < 99970 and Product.MAGNIFICENT_MACARONS in state.order_depths:
+            result[Product.MAGNIFICENT_MACARONS] = self.macaron_order(state)
+            conversions = self.macaron_convert(state)
 
-        # Flatten MACARON Position Near End (recommended by mods to avoid the auto conversion at the end)
-        if state.timestamp >= 999700 and Product.MAGNIFICENT_MACARONS in state.order_depths:
+        # Flatten MACARON Position Near End (recommended by mods to avoid the auto conversion at the end) >= 999700
+        if state.timestamp >= 99970 and Product.MAGNIFICENT_MACARONS in state.order_depths:
             mac_pos = state.position.get(Product.MAGNIFICENT_MACARONS, 0)
             depth = state.order_depths[Product.MAGNIFICENT_MACARONS]
             best_bid = max(depth.buy_orders.keys(), default=None)
