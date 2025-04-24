@@ -2,12 +2,77 @@
 # CODE USED IN ROUND 5 #
 ########################
 
-from datamodel import OrderDepth, TradingState, Order
+from rounds.round5.datamodel import OrderDepth, TradingState, Order
 from math import exp, log, sqrt, erf, pi
 from typing import List, Dict, Tuple, Any
 import jsonpickle
 import numpy as np
 from collections import defaultdict, deque
+
+class Strategy:
+    def __init__(self, symbol: str, limit: int):
+        self.symbol = symbol
+        self.limit = limit
+        self.orders: List[Order] = []
+        self.conversions: int = 0
+
+    def act(self, state: TradingState) -> None:
+        raise NotImplementedError("Each strategy must implement its own 'act' method.")
+
+class MacaronStrategy(Strategy):
+    def __init__(self, symbol: str, limit: int) -> None:
+        super().__init__(symbol, limit)
+        self.conversions = 0 
+
+    def act(self, state: TradingState) -> None:
+        if self.symbol not in state.order_depths:
+            return
+
+        order_depth = state.order_depths[self.symbol]
+        position = state.position.get(self.symbol, 0)
+        observations = state.observations.conversionObservations.get(self.symbol)
+
+        if not observations:
+            return
+
+        orders = self._macaron_orders(order_depth, position, observations)
+        self.orders.extend(orders)
+
+        if position < 0:
+            self.conversions = min(abs(position), 10)
+        elif position > 0:
+            self.conversions = -min(abs(position), 10)
+        else:
+            self.conversions = 0
+
+    def _macaron_orders(
+        self,
+        order_depth: OrderDepth,
+        position: int,
+        observations: Any
+    ) -> List[Order]:
+        orders: List[Order] = []
+
+        away_ask = observations.askPrice
+        away_bid = observations.bidPrice
+        importT = observations.importTariff
+        transport = observations.transportFees
+        exportT = observations.exportTariff
+
+        effective_away_ask = away_ask + importT + transport
+        effective_away_bid = away_bid - exportT - transport
+
+        if not order_depth.sell_orders or not order_depth.buy_orders:
+            return orders
+
+        best_ask = min(order_depth.sell_orders.keys())
+        best_bid = max(order_depth.buy_orders.keys())
+        mid_price = (best_ask + best_bid) / 2
+
+        sell_price = max(int(away_bid + 0.5), round(effective_away_ask + 1))
+        orders.append(Order(self.symbol, sell_price, -10))
+
+        return orders
 
 class Product:
     RAINFOREST_RESIN = "RAINFOREST_RESIN"
@@ -31,21 +96,10 @@ class Product:
     MAGNIFICENT_MACARONS = "MAGNIFICENT_MACARONS"
 
 PARAMS = {
-    Product.VOLCANIC_ROCK: {
-        "take_width": 0, # spread is like non-existant so 0 is okay here
-        "clear_width": 0,
-        "prevent_adverse": True,
-        "adverse_volume": 85,
-        "reversion_beta": 0.02305, # analysis.ipynb
-        "disregard_edge": 1,
-        "join_edge": 2,
-        "default_edge": 1,
-        "soft_position_limit": 170,
-    },
     Product.RAINFOREST_RESIN: {
         "fair_value": 10000,
         "take_width": 3,
-        "clear_width": 0,
+        "clear_width": 1,
         # for making
         "disregard_edge": 1,  # disregards orders for joining or pennying within this value from fair
         "join_edge": 2,  # joins orders within this edge
@@ -57,7 +111,7 @@ PARAMS = {
         "clear_width": 0,
         "prevent_adverse": True,
         "adverse_volume": 15,
-        "reversion_beta": -0.48297, # analysis.ipynb
+        "reversion_beta": -0.47065, # analysis_beta&BSM&trades.ipynb
         "disregard_edge": 1,
         "join_edge": 2,
         "default_edge": 1,
@@ -67,7 +121,7 @@ PARAMS = {
         "clear_width": 0,
         "prevent_adverse": True,
         "adverse_volume": 15,
-        "reversion_beta": -0.0731067, # analysis.ipynb
+        "reversion_beta": -0.08562, # analysis_beta&BSM&trades.ipynb
         "disregard_edge": 1,
         "join_edge": 2,
         "default_edge": 2,
@@ -75,15 +129,15 @@ PARAMS = {
     },
     # For window, zscore threshold and target position: same as what team LU used
     Product.SPREAD1: {
-        "default_spread_mean": 10.8104,#57.6585, # analysis.ipynb
-        "default_spread_std": 80.6083,  # analysis.ipynb
+        "default_spread_mean": -38.2404, # analysis_beta&BSM&trades.ipynb
+        "default_spread_std": 72.8356,   # analysis_beta&BSM&trades.ipynb
         "spread_std_window": 45,
-        "zscore_threshold": 7,
+        "zscore_threshold": 10,
         "target_position": 58 
     },
     Product.SPREAD2: {
-        "default_spread_mean": -4442.0282, # analysis.ipynb
-        "default_spread_std": 68.2446,     # analysis.ipynb
+        "default_spread_mean": -4364.8644, # analysis_beta&BSM&trades.ipynb
+        "default_spread_std": 71.6103,     # analysis_beta&BSM&trades.ipynb
         "spread_std_window": 45,
         "zscore_threshold": 7,
         "target_position": 98
@@ -101,6 +155,7 @@ BASKET_WEIGHTS_2 = {
 
 class Trader:
     def __init__(self, params=None):
+        self.macaron_strategy = MacaronStrategy(Product.MAGNIFICENT_MACARONS, limit=75)
         self.voucher_error_history = defaultdict(lambda: deque(maxlen=50))
         if params is None:
             params = PARAMS
@@ -125,8 +180,13 @@ class Trader:
             Product.VOLCANIC_ROCK_VOUCHER_10500: 200,
             Product.MAGNIFICENT_MACARONS: 75,
             }
-        self.window_size = 15
+        self.window_size = 100
         self.ink_history  = deque(maxlen=self.window_size)
+        self.croissant_history  = deque(maxlen=self.window_size)
+        self.kelp_history  = deque(maxlen=self.window_size)
+        self.resin_history = deque(maxlen=self.window_size)
+        self.basket_history = {"PICNIC_BASKET1": deque(maxlen=self.window_size),
+                               "PICNIC_BASKET2": deque(maxlen=self.window_size)}
 
     def detect_spike(self, current_price):
         if len(self.ink_history) < 10: 
@@ -793,7 +853,7 @@ class Trader:
 
         rock_position = state.position.get(Product.VOLCANIC_ROCK, 0)
         timestamp = state.timestamp
-        TTE = (4 - timestamp / 1_000_000) / 365
+        TTE = (3 - timestamp / 1_000_000) / 365
         if TTE <= 0:
             return []
 
@@ -804,7 +864,7 @@ class Trader:
             Product.VOLCANIC_ROCK_VOUCHER_9500,
             Product.VOLCANIC_ROCK_VOUCHER_9750,
             Product.VOLCANIC_ROCK_VOUCHER_10000,
-            Product.VOLCANIC_ROCK_VOUCHER_10250,
+            #Product.VOLCANIC_ROCK_VOUCHER_10250,
             Product.VOLCANIC_ROCK_VOUCHER_10500,
         ]:
             if voucher not in state.position or voucher not in state.order_depths:
@@ -818,7 +878,7 @@ class Trader:
             net_delta += delta * pos
 
         hedge_needed = round(net_delta - rock_position)
-        hedge_threshold = 2.5 #3
+        hedge_threshold = 3
         orders = []
         if abs(hedge_needed) >= hedge_threshold:
             rock_depth = state.order_depths[Product.VOLCANIC_ROCK]
@@ -861,7 +921,7 @@ class Trader:
 
         return orders
 
-    def macaron_convert(self, state: TradingState, CSI_threshold: float = 41) -> int:
+    def macaron_convert(self, state: TradingState, CSI_threshold: float = 40) -> int:
         """Determine whether to import/export macarons based on CSI and profitability."""
         obs = state.observations.conversionObservations.get(Product.MAGNIFICENT_MACARONS)
         if not obs or Product.MAGNIFICENT_MACARONS not in state.order_depths:
@@ -896,68 +956,113 @@ class Trader:
             traderObject = jsonpickle.decode(state.traderData)
 
         result = {}
-
-        # === Charlie logic for RAINFOREST_RESIN ===
-        product = "RAINFOREST_RESIN"
-        if product in state.order_depths:
-            best_bid = max(state.order_depths[product].buy_orders.keys(), default=None)
-            best_ask = min(state.order_depths[product].sell_orders.keys(), default=None)
-            orders = []
-
-            recent_charlie_trade = None
-            for trade in state.own_trades.get(product, []):
-                if trade.counter_party == "CHARLIE":
-                    recent_charlie_trade = trade
-
-            if recent_charlie_trade:
-                if recent_charlie_trade.quantity < 0 and best_ask is not None:
-                    orders.append(Order(product, best_ask, 3))  # mimic BUY
-                elif recent_charlie_trade.quantity > 0 and best_bid is not None:
-                    orders.append(Order(product, best_bid, -3))  # mimic SELL
-
-            result[product] = orders
-
-        # === Charlie logic for KELP ===
-        product = "KELP"
-        if product in state.order_depths:
-            best_bid = max(state.order_depths[product].buy_orders.keys(), default=None)
-            best_ask = min(state.order_depths[product].sell_orders.keys(), default=None)
-            orders = []
-
-            recent_charlie_trade = None
-            for trade in state.own_trades.get(product, []):
-                if trade.counter_party == "CHARLIE":
-                    recent_charlie_trade = trade
-
-            if recent_charlie_trade:
-                if recent_charlie_trade.quantity < 0 and best_ask is not None:
-                    orders.append(Order(product, best_ask, 3))  # mimic BUY
-                elif recent_charlie_trade.quantity > 0 and best_bid is not None:
-                    orders.append(Order(product, best_bid, -3))  # mimic SELL
-
-            result[product] = orders
-
-
-
-
         
+        # RESIN orders
+        if Product.RAINFOREST_RESIN in self.params and Product.RAINFOREST_RESIN in state.order_depths:
+            resin_orders = []
+            resin_position = state.position.get(Product.RAINFOREST_RESIN, 0)
+            limit = self.LIMIT[Product.RAINFOREST_RESIN]
+            fair_value = self.params[Product.RAINFOREST_RESIN]["fair_value"]
 
+            # Update history
+            self.resin_history.append(fair_value)
+
+            if Product.RAINFOREST_RESIN in state.market_trades:
+                resin_take_orders, buy_order_volume, sell_order_volume = self.take_orders(
+                    Product.RAINFOREST_RESIN,
+                    state.order_depths[Product.RAINFOREST_RESIN],
+                    fair_value,
+                    self.params[Product.RAINFOREST_RESIN]["take_width"],
+                    resin_position,
+                )
+                resin_clear_orders, buy_order_volume, sell_order_volume = self.clear_orders(
+                    Product.RAINFOREST_RESIN,
+                    state.order_depths[Product.RAINFOREST_RESIN],
+                    fair_value,
+                    self.params[Product.RAINFOREST_RESIN]["clear_width"],
+                    resin_position,
+                    buy_order_volume,
+                    sell_order_volume,
+                )
+                resin_make_orders, _, _ = self.make_orders(
+                    Product.RAINFOREST_RESIN,
+                    state.order_depths[Product.RAINFOREST_RESIN],
+                    fair_value,
+                    resin_position,
+                    buy_order_volume,
+                    sell_order_volume,
+                    self.params[Product.RAINFOREST_RESIN]["disregard_edge"],
+                    self.params[Product.RAINFOREST_RESIN]["join_edge"],
+                    self.params[Product.RAINFOREST_RESIN]["default_edge"],
+                    True,
+                    self.params[Product.RAINFOREST_RESIN]["soft_position_limit"],
+                )
+                result[Product.RAINFOREST_RESIN] = (
+                    resin_orders + resin_take_orders + resin_clear_orders + resin_make_orders
+                )
+
+            # KELP orders
+            if Product.KELP in self.params and Product.KELP in state.order_depths:
+                kelp_orders = []
+                kelp_position = state.position.get(Product.KELP, 0)
+                kelp_fair_value = self.KELP_fair_value(state.order_depths[Product.KELP], traderObject)
+                limit = self.LIMIT[Product.KELP]
+
+                # Update history
+                self.kelp_history.append(kelp_fair_value)
+                
+                if Product.KELP in state.market_trades:
+                    kelp_take_orders, buy_order_volume, sell_order_volume = self.take_orders(
+                        Product.KELP,
+                        state.order_depths[Product.KELP],
+                        kelp_fair_value,
+                        self.params[Product.KELP]["take_width"],
+                        kelp_position,
+                        self.params[Product.KELP]["prevent_adverse"],
+                        self.params[Product.KELP]["adverse_volume"],
+                    )
+                    kelp_clear_orders, buy_order_volume, sell_order_volume = self.clear_orders(
+                        Product.KELP,
+                        state.order_depths[Product.KELP],
+                        kelp_fair_value,
+                        self.params[Product.KELP]["clear_width"],
+                        kelp_position,
+                        buy_order_volume,
+                        sell_order_volume,
+                    )
+                    kelp_make_orders, _, _ = self.make_orders(
+                        Product.KELP,
+                        state.order_depths[Product.KELP],
+                        kelp_fair_value,
+                        kelp_position,
+                        buy_order_volume,
+                        sell_order_volume,
+                        self.params[Product.KELP]["disregard_edge"],
+                        self.params[Product.KELP]["join_edge"],
+                        self.params[Product.KELP]["default_edge"],
+                    )
+                    result[Product.KELP] = (kelp_take_orders + kelp_clear_orders + kelp_make_orders
+                    )
 
         # SQUID orders
         if Product.SQUID_INK in self.params and Product.SQUID_INK in state.order_depths:
-            best_bid = max(state.order_depths[Product.SQUID_INK].buy_orders.keys())
-            best_ask = min(state.order_depths[Product.SQUID_INK].sell_orders.keys())
-            self.ink_history.append((best_bid + best_ask)/2)
-            SQUID_INK_position = (
-                state.position[Product.SQUID_INK]
-                if Product.SQUID_INK in state.position
-                else 0
-            )
+            #best_bid = max(state.order_depths[Product.SQUID_INK].buy_orders.keys())
+            #best_ask = min(state.order_depths[Product.SQUID_INK].sell_orders.keys())
+            #mid_price = (best_bid + best_ask) / 2
+            #self.ink_history.append(mid_price)
+
+            SQUID_INK_position = state.position.get(Product.SQUID_INK, 0)
+
             SQUID_INK_fair_value = self.SQUID_INK_fair_value(
                 state.order_depths[Product.SQUID_INK], traderObject
             )
-            SQUID_INK_take_orders, buy_order_volume, sell_order_volume = (
-                self.take_orders(
+            self.ink_history.append(SQUID_INK_fair_value)
+            if Product.SQUID_INK in state.market_trades:
+                # Detect price spike
+                SQUID_INK_spike = self.detect_spike(SQUID_INK_fair_value)
+
+                # Regular order logic
+                SQUID_INK_take_orders, buy_order_volume, sell_order_volume = self.take_orders(
                     Product.SQUID_INK,
                     state.order_depths[Product.SQUID_INK],
                     SQUID_INK_fair_value,
@@ -965,10 +1070,10 @@ class Trader:
                     SQUID_INK_position,
                     self.params[Product.SQUID_INK]["prevent_adverse"],
                     self.params[Product.SQUID_INK]["adverse_volume"],
+                    spike=SQUID_INK_spike
                 )
-            )
-            SQUID_INK_clear_orders, buy_order_volume, sell_order_volume = (
-                self.clear_orders(
+
+                SQUID_INK_clear_orders, buy_order_volume, sell_order_volume = self.clear_orders(
                     Product.SQUID_INK,
                     state.order_depths[Product.SQUID_INK],
                     SQUID_INK_fair_value,
@@ -977,23 +1082,27 @@ class Trader:
                     buy_order_volume,
                     sell_order_volume,
                 )
-            )
-            SQUID_INK_make_orders, _, _ = self.make_orders(
-                Product.SQUID_INK,
-                state.order_depths[Product.SQUID_INK],
-                SQUID_INK_fair_value,
-                SQUID_INK_position,
-                buy_order_volume,
-                sell_order_volume,
-                self.params[Product.SQUID_INK]["disregard_edge"],
-                self.params[Product.SQUID_INK]["join_edge"],
-                self.params[Product.SQUID_INK]["default_edge"],
-                True,
-                self.params[Product.SQUID_INK]["soft_position_limit"],
-            )
-            result[Product.SQUID_INK] = (
-                SQUID_INK_make_orders + SQUID_INK_take_orders + SQUID_INK_clear_orders
-            )
+
+                SQUID_INK_make_orders, _, _ = self.make_orders(
+                    Product.SQUID_INK,
+                    state.order_depths[Product.SQUID_INK],
+                    SQUID_INK_fair_value,
+                    SQUID_INK_position,
+                    buy_order_volume,
+                    sell_order_volume,
+                    self.params[Product.SQUID_INK]["disregard_edge"],
+                    self.params[Product.SQUID_INK]["join_edge"],
+                    self.params[Product.SQUID_INK]["default_edge"],
+                    True,
+                    self.params[Product.SQUID_INK]["soft_position_limit"],
+                )
+
+                squid_orders = (
+                    SQUID_INK_make_orders + SQUID_INK_take_orders + SQUID_INK_clear_orders 
+                )
+
+                result[Product.SQUID_INK] = squid_orders
+        
 
         # SPREAD orders
         if Product.SPREAD1 not in traderObject:
@@ -1012,6 +1121,7 @@ class Trader:
                 "curr_avg": 0,
             }
 
+
         current_positions = {
                 Product.PICNIC_BASKET1: state.position.get(Product.PICNIC_BASKET1, 0),
                 Product.PICNIC_BASKET2: state.position.get(Product.PICNIC_BASKET2, 0)
@@ -1023,16 +1133,101 @@ class Trader:
             for product in spread_orders:
                 result[product] = spread_orders[product]
 
+        # Imitate Charlie's trades for PICNIC_BASKET2 only
+        basket = Product.PICNIC_BASKET2
+        if basket in state.order_depths:
+            orders = []
+            position = state.position.get(basket, 0)
+            limit = self.LIMIT[basket]
+
+            depth = state.order_depths[basket]
+            if len(depth.buy_orders) > 0 and len(depth.sell_orders) > 0:
+                best_bid = max(depth.buy_orders.keys())
+                best_ask = min(depth.sell_orders.keys())
+                fair_value = (best_bid + best_ask) / 2
+
+                self.basket_history[basket].append(fair_value)
+                if len(self.basket_history[basket]) >= self.window_size:
+                    mean_fair = np.mean(self.basket_history[basket])
+
+                    if basket in state.market_trades:
+                        for trade in state.market_trades[basket]:
+                            # BUY IMITATE → Charlie buys
+                            if trade.buyer == "Charlie" and fair_value < mean_fair and position == 0:
+                                qty = min(limit - position, 1)
+                                if qty > 0:
+                                    orders.append(Order(basket, best_ask, qty))
+
+                            # SELL IMITATE → Charlie sells
+                            if trade.seller == "Charlie" and fair_value > mean_fair and position >= 0:
+                                qty = min(limit + position, 1)
+                                if qty > 0:
+                                    orders.append(Order(basket, best_bid, -qty))
+
+                if orders:
+                    result[basket] = orders
+        
+        
+        # CROISSANTS swing trade based on Olivia
+        if Product.CROISSANTS in state.order_depths:
+            croissant_orders = []
+            croissant_position = state.position.get(Product.CROISSANTS, 0)
+            limit = self.LIMIT[Product.CROISSANTS]
+
+            depth = state.order_depths[Product.CROISSANTS]
+            if len(depth.buy_orders) > 0 and len(depth.sell_orders) > 0:
+                best_bid = max(depth.buy_orders.keys())
+                best_ask = min(depth.sell_orders.keys())
+                fair_value = (best_bid + best_ask) / 2
+
+                self.croissant_history.append(fair_value)
+                if len(self.croissant_history) >= self.window_size:
+                    mean_fair = np.mean(self.croissant_history)
+
+                    if Product.CROISSANTS in state.market_trades:
+                        for trade in state.market_trades[Product.CROISSANTS]:
+                            # Enter long if Olivia buys and undervalued and no position
+                            if (
+                                trade.buyer == "Olivia"
+                                and fair_value < mean_fair
+                                and croissant_position == 0
+                            ):
+                                qty = min(limit, limit - croissant_position)
+                                if qty > 0:
+                                    croissant_orders.append(Order(Product.CROISSANTS, best_ask, qty))
+
+                            # Exit long if Olivia sells and overvalued and we have long
+                            elif (
+                                trade.seller == "Olivia"
+                                and fair_value > mean_fair
+                                and croissant_position > 0
+                            ):
+                                qty = min(croissant_position, limit)
+                                if qty > 0:
+                                    croissant_orders.append(Order(Product.CROISSANTS, best_bid, -qty))
+
+            if croissant_orders:
+                result[Product.CROISSANTS] = croissant_orders
+
+        # Run the MacaronStrategy
+        self.macaron_strategy.orders.clear()  # Clear any previous orders
+        self.macaron_strategy.conversions = 0
+        self.macaron_strategy.act(state)
+
+        if self.macaron_strategy.orders:
+            result[Product.MAGNIFICENT_MACARONS] = self.macaron_strategy.orders
+        conversions = self.macaron_strategy.conversions
+    
         
         # VOUCHER thresholds
         # Started with 1.5 for everything, then tried lower/higher values and see how PnL changed
         # This is the end result
         self.voucher_zscore_threshold = {
             Product.VOLCANIC_ROCK_VOUCHER_9500: 1.5,
-            Product.VOLCANIC_ROCK_VOUCHER_9750: 1.6,
+            Product.VOLCANIC_ROCK_VOUCHER_9750: 1.3,#1.6,
             Product.VOLCANIC_ROCK_VOUCHER_10000: 1.35,
-            Product.VOLCANIC_ROCK_VOUCHER_10250: 2.0,
-            Product.VOLCANIC_ROCK_VOUCHER_10500: 0.0 # no matter what value, this voucher nevers trades in bt
+            #Product.VOLCANIC_ROCK_VOUCHER_10250: 2.0,
+            Product.VOLCANIC_ROCK_VOUCHER_10500: 0.0  # no matter what value, this voucher never trades in BT
         } 
 
         # VOUCHER orders
@@ -1050,7 +1245,7 @@ class Trader:
                     Product.VOLCANIC_ROCK_VOUCHER_9500,
                     Product.VOLCANIC_ROCK_VOUCHER_9750,
                     Product.VOLCANIC_ROCK_VOUCHER_10000,
-                    Product.VOLCANIC_ROCK_VOUCHER_10250,
+                    #Product.VOLCANIC_ROCK_VOUCHER_10250,
                     Product.VOLCANIC_ROCK_VOUCHER_10500,
                 ]:
                     if voucher not in state.order_depths:
@@ -1074,12 +1269,12 @@ class Trader:
                     m_t = log(K / S) / sqrt(TTE)
                     vol = self.fitted_vol(m_t)
                     fair_price = self.BS_model(S, K, TTE, vol)
+                    orders = []
 
                     # Z-score trading
                     error = fair_price - Vt
                     self.voucher_error_history[voucher].append(error)
 
-                    orders = []
                     if len(self.voucher_error_history[voucher]) >= 10:
                         history = list(self.voucher_error_history[voucher])
                         mean_error = sum(history) / len(history)
@@ -1114,13 +1309,15 @@ class Trader:
                 result[Product.VOLCANIC_ROCK].extend(hedge_orders)
             else:
                 result[Product.VOLCANIC_ROCK] = hedge_orders
-        
-        # MACARON orders
-        conversions = 0
-        result[Product.MAGNIFICENT_MACARONS] = self.macaron_order(state)
-        conversions = self.macaron_convert(state)
 
-        # Flatten MACARON Position Near End (recommended by mods to avoid the auto conversion at the end)
+        '''
+        # MACARON orders (no new order when end nears! Then we flatten) < 999700
+        conversions = 0
+        if state.timestamp < 999700 and Product.MAGNIFICENT_MACARONS in state.order_depths:
+            result[Product.MAGNIFICENT_MACARONS] = self.macaron_order(state)
+            conversions = self.macaron_convert(state)
+
+        # Flatten MACARON Position Near End (recommended by mods to avoid the auto conversion at the end) >= 999700
         if state.timestamp >= 999700 and Product.MAGNIFICENT_MACARONS in state.order_depths:
             mac_pos = state.position.get(Product.MAGNIFICENT_MACARONS, 0)
             depth = state.order_depths[Product.MAGNIFICENT_MACARONS]
@@ -1142,10 +1339,18 @@ class Trader:
                     order = Order(Product.MAGNIFICENT_MACARONS, best_bid, -qty)
                     result.setdefault(Product.MAGNIFICENT_MACARONS, []).append(order)  
                     conversions = 0     
+        '''
                 
-        
         traderObject["voucher_error_history"] = {
             k: list(v) for k, v in self.voucher_error_history.items()
         }
+        traderObject["basket_history"] = {
+            "PICNIC_BASKET1": list(self.basket_history.get(Product.PICNIC_BASKET1, [])),
+            "PICNIC_BASKET2": list(self.basket_history.get(Product.PICNIC_BASKET2, []))
+        }
+        traderObject["ink_history"] = self.ink_history
+        traderObject["kelp_history"] = self.kelp_history
+        traderObject["resin_history"] = self.resin_history
+        traderObject["croissant_history"] = self.croissant_history
         traderData = jsonpickle.encode(traderObject)
         return result, conversions, traderData
